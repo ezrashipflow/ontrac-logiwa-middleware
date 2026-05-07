@@ -1,5 +1,9 @@
 /**
- * OnTrac <-> Logiwa Custom Carrier Middleware v1.0.0
+ * OnTrac <-> Logiwa Custom Carrier Middleware v1.0.1
+ *
+ * Account: ShipFlow | Customer ID: D991 | Branch: SHFLNBNJ
+ * Injection Facility: SBSC (South Brunswick)
+ * Tender: 16:00 ET | Departure: 17:00 ET
  *
  * Endpoints called by Logiwa:
  *   POST /get-rate          -> OnTrac ServicesAndCharges API
@@ -30,14 +34,14 @@ const MIDDLEWARE_URL = process.env.RAILWAY_PUBLIC_DOMAIN
 
 const labelCache = {};
 
-// --- DEFAULT FROM ADDRESS (ShipFlow warehouse) --------------------------------
+// --- SHIPFLOW WAREHOUSE DEFAULTS ----------------------------------------------
 
 const DEFAULT_FROM = {
   Contact:             'Shipping Manager',
   Company:             'ShipFlow',
   StreetAddress:       '625 JERSEY AVE',
   Address2:            'STE 9',
-  PostalCode:          '08901',
+  PostalCode:          '08901-3679',
   City:                'NEW BRUNSWICK',
   State:               'NJ',
   ISOCountryCode:      'US',
@@ -45,8 +49,54 @@ const DEFAULT_FROM = {
   SpecialInstructions: '',
 };
 
+const INJECTION_FACILITY_CODE   = 'SBSC';
+const INJECTION_POSTAL_CODE     = '08901';
+const CUSTOMER_BRANCH_POSTAL    = '08901';
+
+// --- EASTERN TIME SCHEDULING --------------------------------------------------
+// ONTrac requires specific pickup/departure times (16:00 ET tender, 17:00 ET departure).
+// These helpers compute the correct next UTC datetime without any external library.
+
+function getNthSunday(year, month0, n) {
+  // Returns the nth Sunday of the given month at 02:00 UTC (DST transition time)
+  const d = new Date(Date.UTC(year, month0, 1));
+  const offset = (7 - d.getUTCDay()) % 7; // days until first Sunday
+  return new Date(Date.UTC(year, month0, 1 + offset + (n - 1) * 7, 2, 0, 0));
+}
+
+function etOffsetHours(date) {
+  // EDT (UTC-4) runs from 2nd Sunday in March to 1st Sunday in November
+  const y    = date.getUTCFullYear();
+  const dstStart = getNthSunday(y, 2, 2);   // 2nd Sunday in March
+  const dstEnd   = getNthSunday(y, 10, 1);  // 1st Sunday in November
+  return (date >= dstStart && date < dstEnd) ? 4 : 5; // EDT=4, EST=5
+}
+
+function nextETTimeUTC(hourET) {
+  // Returns ISO string for the next occurrence of hourET:00:00 ET
+  const now    = new Date();
+  const offset = etOffsetHours(now);
+  const target = new Date(Date.UTC(
+    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(),
+    hourET + offset, 0, 0, 0
+  ));
+  // If we are already past that time today, advance to tomorrow
+  if (now >= target) target.setUTCDate(target.getUTCDate() + 1);
+  return target.toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+function tenderDateTime() {
+  return nextETTimeUTC(16); // 4:00 PM ET
+}
+
+function expectedDepartureDateTime() {
+  // Always 1 hour after the tender (17:00 ET, same calendar day)
+  const tenderISO = tenderDateTime();
+  const departure = new Date(new Date(tenderISO).getTime() + 60 * 60 * 1000);
+  return departure.toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
 // --- LOGGING ------------------------------------------------------------------
-// Logs carrier API calls only -- no full Logiwa payload dumps (avoids Railway log rate limit)
 
 function logRequest(tag, method, url, body) {
   console.log('\n' + '-'.repeat(60));
@@ -106,7 +156,7 @@ function weightToLbs(value, unit) {
   if (u === 'OZ') return Math.max(v / 16,      0.1);
   if (u === 'G')  return Math.max(v / 453.592, 0.1);
   if (u === 'KG') return Math.max(v * 2.20462, 0.1);
-  return Math.max(v, 0.1); // LB / LBS default
+  return Math.max(v, 0.1);
 }
 
 // Map Logiwa shippingOption string -> ONTrac ServiceCode
@@ -115,7 +165,7 @@ function mapServiceCode(s) {
   const u = s.toUpperCase();
   if (u === 'XPRS' || u.includes('EXPRESS') || u.includes('EXP')) return 'XPRS';
   if (u === 'GRES' || u.includes('RESIDENTIAL') || u.includes('GRES')) return 'GRES';
-  return 'GRND'; // default to Ground
+  return 'GRND';
 }
 
 // Build ONTrac TenderAt / ReturnTo block from Logiwa shipFrom (falls back to ShipFlow defaults)
@@ -134,11 +184,6 @@ function buildTenderAt(shipFrom) {
     Phone:               c.phone      || DEFAULT_FROM.Phone,
     SpecialInstructions: '',
   };
-}
-
-// ONTrac requires a future TenderDateTime -- use now + 1 hour
-function tenderDateTime() {
-  return new Date(Date.now() + 60 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 
 // Build a single ONTrac Piece from a Logiwa package line item
@@ -173,9 +218,11 @@ function buildPiece(pkg) {
 // --- HEALTH CHECK -------------------------------------------------------------
 
 app.get('/', (req, res) => res.json({
-  status:  'running',
-  service: 'OnTrac <-> Logiwa Middleware',
-  version: '1.0.0',
+  status:          'running',
+  service:         'OnTrac <-> Logiwa Middleware',
+  version:         '1.0.1',
+  customerBranch:  ONTRAC_CUSTOMER_BRANCH,
+  injectionFacility: INJECTION_FACILITY_CODE,
 }));
 
 // --- LABEL PROXY --------------------------------------------------------------
@@ -213,10 +260,15 @@ app.post('/get-rate', async (req, res) => {
       const toContact = getContact(order.shipTo);
       const piece     = buildPiece(pkg);
 
+      const tender    = tenderDateTime();
+      console.log('[GET-RATE] TenderDateTime=' + tender);
+
       const rateReq = {
-        CustomerBranch: ONTRAC_CUSTOMER_BRANCH,
-        TenderDateTime: tenderDateTime(),
-        TenderAt:       buildTenderAt(order.shipFrom),
+        CustomerBranch:       ONTRAC_CUSTOMER_BRANCH,
+        TenderDateTime:       tender,
+        TenderAt:             buildTenderAt(order.shipFrom),
+        InjectionFacilityCode: INJECTION_FACILITY_CODE,
+        InjectionPostalCode:  INJECTION_POSTAL_CODE,
         DeliverTo: {
           Contact:        toContact.name    || 'Recipient',
           Company:        toContact.company || '',
@@ -261,7 +313,7 @@ app.post('/get-rate', async (req, res) => {
           };
         });
 
-        // Prefer returning only the requested service if available
+        // Prefer the requested service if available
         const matched = rateList.find(r => r.shippingOption === requestedService);
         if (matched) rateList = [matched];
 
@@ -317,6 +369,10 @@ app.post('/create-label', async (req, res) => {
       const toContact = getContact(order.shipTo);
       const piece     = buildPiece(pkg);
       const svcCode   = mapServiceCode(order.shippingOption);
+      const tender    = tenderDateTime();
+      const departure = expectedDepartureDateTime();
+
+      console.log('[CREATE-LABEL] TenderDateTime=' + tender + ' DepartureDateTime=' + departure);
 
       // Label format: P4x6 = PDF (default), Z4x6 = ZPL
       const rawFmt = (
@@ -327,17 +383,21 @@ app.post('/create-label', async (req, res) => {
       const isZpl         = rawFmt === 'ZPL';
       const labelFmtParam = isZpl ? 'Z4x6' : 'P4x6';
       const labelFmt      = isZpl ? 'zpl'  : 'pdf';
-      console.log('[CREATE-LABEL] Label format: ' + labelFmt.toUpperCase() + ' param=' + labelFmtParam);
+      console.log('[CREATE-LABEL] Label format: ' + labelFmt.toUpperCase() + ' (' + labelFmtParam + ')');
 
       const orderReq = {
-        CustomerBranch:      ONTRAC_CUSTOMER_BRANCH,
-        CustomerOrderNumber: (order.shipmentOrderCode || '').slice(0, 30),
-        Reference1:          order.shipmentOrderCode || '',
-        Reference2:          '',
-        ServiceCode:         svcCode,
-        PickupType:          'OnTrac',
-        TenderDateTime:      tenderDateTime(),
-        TenderAt:            buildTenderAt(order.shipFrom),
+        CustomerBranch:            ONTRAC_CUSTOMER_BRANCH,
+        CustomerOrderNumber:       (order.shipmentOrderCode || '').slice(0, 30),
+        Reference1:                order.shipmentOrderCode || '',
+        Reference2:                '',
+        ServiceCode:               svcCode,
+        PickupType:                'OnTrac',
+        TenderDateTime:            tender,
+        ExpectedDepartureDateTime: departure,
+        TenderAt:                  buildTenderAt(order.shipFrom),
+        InjectionFacilityCode:     INJECTION_FACILITY_CODE,
+        InjectionPostalCode:       INJECTION_POSTAL_CODE,
+        CustomerBranchePostalCode: CUSTOMER_BRANCH_POSTAL,
         DeliverTo: {
           Contact:             toContact.name    || 'Recipient',
           Company:             toContact.company || '',
@@ -355,7 +415,7 @@ app.post('/create-label', async (req, res) => {
         Pieces: [piece],
       };
 
-      // Production URL: Test=0, Label=1, LabelFormat=P4x6 or Z4x6
+      // Production URL: Test=0, Label=1, format=P4x6 or Z4x6
       const labelUrl = ONTRAC_BASE_URL + '/Method/PlaceOrder/v3/json/'
         + ONTRAC_WSID + '/' + ONTRAC_WSKEY + '/0/1/' + labelFmtParam;
       logRequest('CREATE-LABEL', 'POST', labelUrl.replace(ONTRAC_WSKEY, '***WSKey***'), orderReq);
@@ -367,7 +427,7 @@ app.post('/create-label', async (req, res) => {
 
         const d = ontracRes.data;
 
-        // Log response but omit full base64 label data
+        // Log without dumping full base64
         logResponse('CREATE-LABEL', ontracRes.status, {
           Error:        d.Error,
           ErrorMessage: d.ErrorMessage,
@@ -475,7 +535,7 @@ app.post('/create-label', async (req, res) => {
 
 // --- VOID LABEL ---------------------------------------------------------------
 // OnTrac does not support voiding labels via API.
-// We clear the label from local cache and return success so Logiwa does not error.
+// Clear local cache and return success so Logiwa does not error.
 
 app.post('/void-label', (req, res) => {
   const orders = parseLogiwaBody(req.body);
@@ -516,8 +576,9 @@ app.post('/end-of-day-report', (req, res) => {
 // --- START --------------------------------------------------------------------
 
 app.listen(PORT, () => {
-  console.log('\nOnTrac-Logiwa Middleware v1.0.0 on port ' + PORT);
-  console.log('   Label proxy    : ' + MIDDLEWARE_URL + '/label/:id');
-  console.log('   Customer Branch: ' + ONTRAC_CUSTOMER_BRANCH);
-  console.log('   Base URL       : ' + ONTRAC_BASE_URL + '\n');
+  console.log('\nOnTrac-Logiwa Middleware v1.0.1 on port ' + PORT);
+  console.log('   Label proxy      : ' + MIDDLEWARE_URL + '/label/:id');
+  console.log('   Customer Branch  : ' + ONTRAC_CUSTOMER_BRANCH);
+  console.log('   Injection Facility: ' + INJECTION_FACILITY_CODE);
+  console.log('   Base URL         : ' + ONTRAC_BASE_URL + '\n');
 });
