@@ -202,6 +202,7 @@ function buildPiece(pkg) {
     Weight:                  Math.round(lbs * 100) / 100,
     WeightUnitOfMeasurement: 'lbs',
     Description:             'Shipment',
+    Attributes:              [],
   };
 
   if (l > 0 && w > 0 && h > 0) {
