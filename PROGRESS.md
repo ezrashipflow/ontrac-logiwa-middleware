@@ -4,10 +4,27 @@
 A Railway-hosted Node.js middleware that connects Logiwa (WMS) to OnTrac's shipping API.
 Logiwa calls this middleware to get rates, create labels, void labels, and run end-of-day reports.
 
-## Credentials & Config
-- CustomerBranch: SHFLNBNJ
+## Account Details
+- Customer ID: D991
+- Company: ShipFlow
+- Customer Branch: SHFLNBNJ
+- Injection Facility: SBSC (South Brunswick)
+- TenderAt / Return Address: 625 JERSEY AVE, STE 9, NEW BRUNSWICK, NJ 08901-3679
+- Tender Time: 16:00 ET (4:00 PM)
+- Departure Time: 17:00 ET (5:00 PM)
+- Default Service: GRND
 - WSID / WSKey: stored in Railway environment variables (never committed to git)
-- Railway URL: (update this once deployed)
+
+## Live URLs
+- Railway app: https://ontrac-logiwa-middleware-production.up.railway.app
+- Health check: https://ontrac-logiwa-middleware-production.up.railway.app/
+- Get Rate:     https://ontrac-logiwa-middleware-production.up.railway.app/get-rate
+- Create Label: https://ontrac-logiwa-middleware-production.up.railway.app/create-label
+- Void Label:   https://ontrac-logiwa-middleware-production.up.railway.app/void-label
+- End of Day:   https://ontrac-logiwa-middleware-production.up.railway.app/end-of-day-report
+
+## GitHub Repo
+https://github.com/ezrashipflow/ontrac-logiwa-middleware
 
 ## OnTrac API Notes
 - Auth: WSID + WSKey passed directly in the URL path -- no token refresh needed
@@ -17,7 +34,6 @@ Logiwa calls this middleware to get rates, create labels, void labels, and run e
   - Label format: P4x6 = PDF, Z4x6 = ZPL
 - Void Label: NOT supported by OnTrac API (middleware returns success stub)
 - End of Day: NOT supported by OnTrac API (middleware returns success stub)
-- Tracking: GET /Method/Track/v3/json/{WSID}/{WSKey}/{TRACKINGNUMBER}
 
 ## Service Codes
 | Logiwa shippingOption | OnTrac ServiceCode |
@@ -31,28 +47,40 @@ Logiwa calls this middleware to get rates, create labels, void labels, and run e
 ## Session Log
 
 ### Session 1 - 2026-05-07
-**Status: GitHub repo created, code written, NOT YET deployed to Railway**
+**Status: Deployed to Railway. Ready for Logiwa configuration.**
 
 Completed:
 - Reviewed DHL and UNiUNi middleware repos for pattern
 - Read full OnTrac API documentation (ws.ontrac.com)
 - Retrieved OnTrac sample payload for SHFLNBNJ branch
-- Built server.js matching exact DHL/UNiUNi pattern
-- Created package.json, env.example, .gitignore
+- Built server.js v1.0.1 with exact account details:
+  - InjectionFacilityCode: SBSC
+  - TenderDateTime: 16:00 ET, Departure: 17:00 ET
+  - PostalCode: 08901-3679 (zip+4)
+- Created package.json, env.example, .gitignore, PROGRESS.md
 - Created GitHub repo: https://github.com/ezrashipflow/ontrac-logiwa-middleware
-- Pushed all files to main branch
+- Deployed to Railway
+- Railway domain: ontrac-logiwa-middleware-production.up.railway.app
+
+Railway environment variables set:
+- [x] ONTRAC_WSID
+- [x] ONTRAC_WSKEY
+- [x] ONTRAC_CUSTOMER_BRANCH = SHFLNBNJ
 
 Next steps (pick up here next session):
-1. Deploy to Railway (same way as DHL/UNiUNi)
-   - Create new Railway project
-   - Connect to GitHub repo ezrashipflow/ontrac-logiwa-middleware
-   - Add environment variables: ONTRAC_WSID, ONTRAC_WSKEY, ONTRAC_CUSTOMER_BRANCH
-2. Get the Railway public URL and update MIDDLEWARE_URL env var if needed
-3. Configure Logiwa custom carrier:
-   - Carrier name: ONTrac
-   - get-rate URL: https://<railway-url>/get-rate
-   - create-label URL: https://<railway-url>/create-label
-   - void-label URL: https://<railway-url>/void-label
-   - end-of-day-report URL: https://<railway-url>/end-of-day-report
+1. Confirm env variables are added in Railway (ONTRAC_WSID, ONTRAC_WSKEY, ONTRAC_CUSTOMER_BRANCH)
+2. Hit the health check URL to confirm app is running:
+   https://ontrac-logiwa-middleware-production.up.railway.app/
+3. Configure Logiwa custom carrier (see Logiwa Setup section below)
 4. Test with a real Logiwa shipment order
 5. Confirm label generates and tracking number appears in Logiwa
+
+## Logiwa Custom Carrier Setup
+In Logiwa go to: Settings -> Carriers -> Add Custom Carrier
+
+Field values:
+- Carrier Name: ONTrac
+- Get Rate URL:     https://ontrac-logiwa-middleware-production.up.railway.app/get-rate
+- Create Label URL: https://ontrac-logiwa-middleware-production.up.railway.app/create-label
+- Void Label URL:   https://ontrac-logiwa-middleware-production.up.railway.app/void-label
+- End of Day URL:   https://ontrac-logiwa-middleware-production.up.railway.app/end-of-day-report
