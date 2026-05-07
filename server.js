@@ -265,11 +265,9 @@ app.post('/get-rate', async (req, res) => {
       console.log('[GET-RATE] TenderDateTime=' + tender);
 
       const rateReq = {
-        CustomerBranch:       ONTRAC_CUSTOMER_BRANCH,
-        TenderDateTime:       tender,
-        TenderAt:             buildTenderAt(order.shipFrom),
-        InjectionFacilityCode: INJECTION_FACILITY_CODE,
-        InjectionPostalCode:  INJECTION_POSTAL_CODE,
+        CustomerBranch: ONTRAC_CUSTOMER_BRANCH,
+        TenderDateTime: tender,
+        TenderAt:       buildTenderAt(order.shipFrom),
         DeliverTo: {
           Contact:        toContact.name    || 'Recipient',
           Company:        toContact.company || '',
