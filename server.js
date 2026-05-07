@@ -159,16 +159,6 @@ function weightToLbs(value, unit) {
   return Math.max(v, 0.1);
 }
 
-// ONTrac only delivers to these western US states
-const ONTRAC_SERVICE_STATES = new Set([
-  'CA','AZ','NV','OR','WA','ID','UT','CO','NM',
-]);
-
-function isInServiceArea(state, country) {
-  if ((country || 'US').toUpperCase() !== 'US') return false;
-  return ONTRAC_SERVICE_STATES.has((state || '').toUpperCase());
-}
-
 // Map Logiwa shippingOption string -> ONTrac ServiceCode
 function mapServiceCode(s) {
   if (!s) return 'GRND';
@@ -273,19 +263,6 @@ app.post('/get-rate', async (req, res) => {
 
       const tender    = tenderDateTime();
       console.log('[GET-RATE] TenderDateTime=' + tender);
-
-      // Pre-check: ONTrac only serves CA, AZ, NV, OR, WA, ID, UT, CO, NM
-      if (!isInServiceArea(shipTo.state, shipTo.country)) {
-        console.log('[GET-RATE] Out of service area: state=' + shipTo.state + ' postal=' + shipTo.postalCode + ' -- skipping OnTrac API call');
-        out.push({
-          shipmentOrderCode:       order.shipmentOrderCode,
-          shipmentOrderIdentifier: order.shipmentOrderIdentifier,
-          rateList:     [],
-          isSuccessful: false,
-          message:      ['OnTrac does not deliver to ' + (shipTo.state || shipTo.postalCode) + '. OnTrac serves CA, AZ, NV, OR, WA, ID, UT, CO, NM only.'],
-        });
-        continue;
-      }
 
       const rateReq = {
         CustomerBranch: ONTRAC_CUSTOMER_BRANCH,
@@ -396,22 +373,6 @@ app.post('/create-label', async (req, res) => {
 
       console.log('[CREATE-LABEL] TenderDateTime=' + tender + ' DepartureDateTime=' + departure);
 
-      // Pre-check: ONTrac only serves CA, AZ, NV, OR, WA, ID, UT, CO, NM
-      if (!isInServiceArea(shipTo.state, shipTo.country)) {
-        console.log('[CREATE-LABEL] Out of service area: state=' + shipTo.state + ' -- skipping OnTrac API call');
-        out.push({
-          shipmentOrderIdentifier: order.shipmentOrderIdentifier,
-          shipmentOrderCode:       order.shipmentOrderCode,
-          carrier:        order.carrier || 'ONTRAC',
-          shippingOption: order.shippingOption,
-          packageResponse: [],
-          rateDetail: { totalCost: 0, shippingCost: 0, otherCost: 0, currency: 'USD' },
-          masterTrackingNumber: '',
-          isSuccessful: false,
-          message: ['OnTrac does not deliver to ' + (shipTo.state || shipTo.postalCode) + '. OnTrac serves CA, AZ, NV, OR, WA, ID, UT, CO, NM only.'],
-        });
-        continue;
-      }
 
       // Label format: P4x6 = PDF (default), Z4x6 = ZPL
       const rawFmt = (
