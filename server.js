@@ -202,6 +202,8 @@ function buildPiece(pkg) {
     Weight:                  Math.round(lbs * 100) / 100,
     WeightUnitOfMeasurement: 'lbs',
     Description:             'Shipment',
+    Reference:               '',
+    ExpirationDate:          null,
     Attributes:              [],
   };
 
@@ -294,8 +296,11 @@ app.post('/get-rate', async (req, res) => {
         });
         logResponse('GET-RATE', rateRes.status, rateRes.data);
 
-        const services = Array.isArray(rateRes.data?.ServicesAndCharges)
-          ? rateRes.data.ServicesAndCharges : [];
+        // ServicesAndCharges is an object keyed by service code, not an array
+        const svcObj = rateRes.data?.ServicesAndCharges || {};
+        const services = Array.isArray(svcObj)
+          ? svcObj
+          : Object.entries(svcObj).map(([code, svc]) => ({ ServiceCode: code, ...svc }));
 
         const requestedService = mapServiceCode(order.shippingOption);
 
@@ -387,6 +392,7 @@ app.post('/create-label', async (req, res) => {
 
       const orderReq = {
         CustomerBranch:            ONTRAC_CUSTOMER_BRANCH,
+        ThirdPartyBillingAccount:  '',
         CustomerOrderNumber:       (order.shipmentOrderCode || '').slice(0, 30),
         Reference1:                order.shipmentOrderCode || '',
         Reference2:                '',
@@ -394,7 +400,7 @@ app.post('/create-label', async (req, res) => {
         PickupType:                'OnTrac',
         TenderDateTime:            tender,
         ExpectedDepartureDateTime: departure,
-        TenderAt:                  buildTenderAt(order.shipFrom),
+        TenderAt:                  { ...DEFAULT_FROM },
         InjectionFacilityCode:     INJECTION_FACILITY_CODE,
         InjectionPostalCode:       INJECTION_POSTAL_CODE,
         CustomerBranchePostalCode: CUSTOMER_BRANCH_POSTAL,
@@ -411,7 +417,7 @@ app.post('/create-label', async (req, res) => {
           Email:               toContact.email   || '',
           SpecialInstructions: '',
         },
-        ReturnTo: buildTenderAt(order.shipFrom),
+        ReturnTo: { ...DEFAULT_FROM },
         Pieces: [piece],
       };
 
