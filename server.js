@@ -326,7 +326,24 @@ app.post('/get-rate', async (req, res) => {
 
       } catch (e) {
         logError('GET-RATE', e);
-        msg = 'OnTrac error: ' + (e.response?.data?.ErrorMessage || e.message);
+        const isNoRate = e.response?.data?.ErrorMessage === 'NoRate';
+        if (isNoRate) {
+          // OnTrac has no rate for this route but PlaceOrder may still succeed.
+          // Return a $0 stub so Logiwa can proceed to create-label.
+          const svcCode = mapServiceCode(order.shippingOption);
+          rateList = [{
+            carrier:        order.carrier || 'ONTRAC',
+            shippingOption: svcCode,
+            totalCost:      0,
+            shippingCost:   0,
+            otherCost:      0,
+            currency:       'USD',
+            estimatedDays:  0,
+          }];
+          console.log('[GET-RATE] NoRate from OnTrac — returning $0 stub for ' + svcCode);
+        } else {
+          msg = 'OnTrac error: ' + (e.response?.data?.ErrorMessage || e.message);
+        }
       }
 
       out.push({
