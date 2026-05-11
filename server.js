@@ -203,7 +203,6 @@ function buildPiece(pkg) {
     WeightUnitOfMeasurement: 'lbs',
     Description:             'Shipment',
     Reference:               '',
-    ExpirationDate:          null,
     Attributes:              [],
   };
 
