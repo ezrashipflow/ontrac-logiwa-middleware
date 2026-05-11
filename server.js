@@ -454,9 +454,9 @@ app.post('/create-label', async (req, res) => {
         const pieces      = Array.isArray(ontracOrder.Pieces) ? ontracOrder.Pieces : [];
         const firstPiece  = pieces[0] || {};
 
-        // Tracking number (Barcode) and label come from the Piece object
+        // Tracking number (Barcode) and label come from the Piece or Order object
         const trk       = firstPiece.Barcode || ontracOrder.Barcode || order.shipmentOrderCode;
-        const labelData = firstPiece.Label   || '';
+        const labelData = firstPiece.Label   || ontracOrder.Labels  || '';
 
         if (labelData) {
           labelCache[trk] = { labelData, format: labelFmt };
