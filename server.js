@@ -269,7 +269,7 @@ app.post('/get-rate', async (req, res) => {
       const rateReq = {
         CustomerBranch: ONTRAC_CUSTOMER_BRANCH,
         TenderDateTime: tender,
-        TenderAt:       buildTenderAt(order.shipFrom),
+        TenderAt:       { ...DEFAULT_FROM },
         DeliverTo: {
           Contact:        toContact.name    || 'Recipient',
           Company:        toContact.company || '',
