@@ -1,5 +1,5 @@
 # ONTrac Logiwa Middleware — Session Handoff
-**Date:** 2026-05-07
+**Last updated:** 2026-05-11
 **Built by:** Claude Code (AI assistant) with Ezra (ShipFlow)
 
 ---
@@ -168,41 +168,70 @@ Settings → Integrations → Custom Carrier → Add New
 - Removed the check entirely
 - Fixed in commit: "Remove incorrect western-US-only service area check"
 
-### 8. Current status at end of session
-- Middleware is deployed and running on Railway
-- Logiwa is configured with all URLs
-- Test was attempted with a Detroit, MI order (order #4748532755-A)
-- Rate call reached OnTrac API successfully (no more Attributes error)
-- Last error seen: `InjectionPostalCodeNotAllowed` from the ServicesAndCharges call
-  - This was FIXED in the last push — the fix removes InjectionPostalCode from get-rate
-- The bad service area check was also REMOVED in the last push
-- **Railway has redeployed with both fixes but a live test was NOT completed before end of session**
+### 8. Session 2 fixes (2026-05-11)
+
+**Bug 4: `estimatedDays: null` causing Logiwa to reject get-rate response**
+- Error: `Error converting value {null} to type 'System.Int32'. Path 'data[0].rateList[0].estimatedDays'`
+- Logiwa's .NET deserializer requires `estimatedDays` to be an integer, not null
+- Fix: changed `estimatedDays: null` → `estimatedDays: 0`
+- Committed as `cd19952` — deployed and confirmed working
+
+**Bug 5: Label not delivered to Logiwa ("Label Result is empty. PDF header not found.")**
+- Root cause: code was reading `firstPiece.Label` but OnTrac actually returns the label at `Order.Labels` (top-level), not inside Pieces
+- Fix: `const labelData = firstPiece.Label || ontracOrder.Labels || ''`
+- Committed as `1cd0afd` — confirmed working, label cached and served via proxy URL
+- Confirmed working: logs show `[CREATE-LABEL] Label cached -> key=1LSD991000W1RFI format=pdf`
+
+**Bug 6: get-rate returns NoRate — `TenderAt` origin address was wrong**
+- get-rate was building `TenderAt` from `order.shipFrom` (whatever Logiwa sent), which could be empty or a different warehouse address
+- create-label was already using the hardcoded `DEFAULT_FROM` (ShipFlow, 625 JERSEY AVE, NJ) and worked fine
+- Fix: changed get-rate to also use `{ ...DEFAULT_FROM }` for `TenderAt` — same as create-label
+- Committed as `611f076` — deployed
+
+**Remaining issue: ServicesAndCharges still returns NoRate even with correct TenderAt**
+- After the TenderAt fix, OnTrac is still returning `NoRate` (HTTP 400) for NJ → CA GRND
+- This is **NOT a code bug** — it is an OnTrac account configuration issue
+- The rate table for account SHFLNBNJ / D991 does not appear to have rates loaded for all routes
+- PlaceOrder (create-label) succeeds for the same routes — a different system, unaffected by the rate table
+- **Workaround in place:** when ServicesAndCharges returns NoRate, the middleware returns a `$0 stub rate` so Logiwa can still proceed to create-label (committed as `d32a865`)
+- **Action needed:** Email Eugene (OnTrac head IT) to get the rate table fully loaded for all service areas
+  - Sample label to attach: `https://ontrac-logiwa-middleware-production.up.railway.app/label/1LSD991000W1RFI`
+  - Email was drafted in this session (ask Claude to regenerate if needed)
+
+### 9. Current status (end of 2026-05-11 session)
+- Middleware is deployed and running on Railway ✓
+- Logiwa is configured with all URLs ✓
+- Create label works — tracking number and PDF label generated successfully ✓
+- Get rate works technically (returns a rate to Logiwa) BUT the rate is $0 because OnTrac's ServicesAndCharges API returns NoRate for this account
+- Root cause of $0: rate table not fully configured on OnTrac's side for account SHFLNBNJ
+- Email sent (or to be sent) to Eugene at OnTrac to resolve rate table
 
 ---
 
 ## Where to Pick Up Next Session
 
-### Step 1 — Verify the fix worked
-1. Open Railway logs tab
-2. In Logiwa, find order #4748532755-A (Detroit, MI) or any order
-3. Try to get a rate using ONTrac
-4. In Railway logs you should see either:
-   - `[GET-RATE] OK` with rates — success
-   - `[GET-RATE] ERROR` with a new error message — bring that error here
+### Step 1 — Follow up with Eugene at OnTrac
+- Confirm he received the email about the rate table
+- Ask him to confirm when the rate table is loaded for all GRND/GRES/XPRS routes
+- Once he confirms, remove the $0 NoRate stub from `server.js` (or keep it as a safety net — your call)
 
-### Step 2 — Test create label
-Once get-rate works, test creating an actual label:
-1. Pick an order going to any US destination
-2. Select ONTrac / OnTrac Ground as the carrier
-3. Click Create Label
-4. Confirm a tracking number appears and a label PDF is generated
+### Step 2 — Test get-rate after OnTrac fixes the rate table
+1. In Logiwa, try to rate-shop any order using ONTrac
+2. In Railway logs, you should now see `[GET-RATE] OK` with a real dollar amount (not the NoRate stub line)
+3. Verify the rate shown in Logiwa matches what OnTrac quotes
 
-### Step 3 — If any errors come up
-Paste the Railway logs here and we debug. The logs are very detailed.
+### Step 3 — Remove the $0 stub (optional)
+Once real rates come back, you can optionally remove the NoRate stub in `server.js` around line 327:
+```js
+// Remove or keep this block — if removed, NoRate will block Logiwa from showing the carrier
+const isNoRate = e.response?.data?.ErrorMessage === 'NoRate';
+if (isNoRate) { ... }
+```
+Keeping it is fine — it means if OnTrac ever has a route with no rate, the label can still be created.
 
-### Step 4 — When everything works
-- Do a real shipment to confirm the label scans and tracking works with OnTrac
-- Contact your OnTrac rep to confirm the account is active for API usage
+### Step 4 — Full end-to-end test
+- Ship a real order via ONTrac from Logiwa
+- Confirm the label scans and tracking updates on OnTrac's tracking page
 
 ---
 
