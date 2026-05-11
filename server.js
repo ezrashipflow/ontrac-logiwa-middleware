@@ -313,7 +313,7 @@ app.post('/get-rate', async (req, res) => {
             shippingCost:   totalCost,
             otherCost:      0,
             currency:       svc.Charges?.[0]?.Currency || 'USD',
-            estimatedDays:  null,
+            estimatedDays:  0,
           };
         });
 
