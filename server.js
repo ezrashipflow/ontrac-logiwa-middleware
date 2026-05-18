@@ -307,7 +307,7 @@ app.post('/get-rate', async (req, res) => {
         rateList = services.map(svc => {
           const totalCost = (svc.Charges || []).reduce((sum, c) => sum + (parseFloat(c.Amount) || 0), 0);
           return {
-            carrier:        order.carrier || 'ONTRAC',
+            carrier:        'ONTRAC - REG',
             shippingOption: svc.ServiceCode,
             totalCost,
             shippingCost:   totalCost,
@@ -332,7 +332,7 @@ app.post('/get-rate', async (req, res) => {
           // Return a $0 stub so Logiwa can proceed to create-label.
           const svcCode = mapServiceCode(order.shippingOption);
           rateList = [{
-            carrier:        order.carrier || 'ONTRAC',
+            carrier:        'ONTRAC - REG',
             shippingOption: svcCode,
             totalCost:      0,
             shippingCost:   0,
@@ -489,7 +489,7 @@ app.post('/create-label', async (req, res) => {
         out.push({
           shipmentOrderIdentifier: order.shipmentOrderIdentifier,
           shipmentOrderCode:       order.shipmentOrderCode,
-          carrier:        order.carrier || 'ONTRAC',
+          carrier:        'ONTRAC - REG',
           shippingOption: order.shippingOption,
           packageResponse: [{
             packageSequenceNumber: pkg.packageSequenceNumber || 0,
@@ -522,7 +522,7 @@ app.post('/create-label', async (req, res) => {
         out.push({
           shipmentOrderIdentifier: order.shipmentOrderIdentifier,
           shipmentOrderCode:       order.shipmentOrderCode,
-          carrier:        order.carrier || 'ONTRAC',
+          carrier:        'ONTRAC - REG',
           shippingOption: order.shippingOption,
           packageResponse: [],
           rateDetail: { totalCost: 0, shippingCost: 0, otherCost: 0, currency: 'USD' },
@@ -544,7 +544,7 @@ app.post('/create-label', async (req, res) => {
       data: [{
         shipmentOrderIdentifier: o.shipmentOrderIdentifier,
         shipmentOrderCode:       o.shipmentOrderCode,
-        carrier:        o.carrier || 'ONTRAC',
+        carrier:        'ONTRAC - REG',
         shippingOption: o.shippingOption,
         packageResponse: [],
         rateDetail: { totalCost: 0, shippingCost: 0, otherCost: 0, currency: 'USD' },
