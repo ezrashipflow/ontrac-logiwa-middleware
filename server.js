@@ -33,6 +33,7 @@ const MIDDLEWARE_URL = process.env.RAILWAY_PUBLIC_DOMAIN
   : (process.env.MIDDLEWARE_URL || 'https://ontrac-logiwa-middleware-production.up.railway.app');
 
 const labelCache = {};
+const rateCache  = {}; // orderCode -> totalCost, populated by get-rate, consumed by create-label
 
 // --- SHIPFLOW WAREHOUSE DEFAULTS ----------------------------------------------
 
@@ -332,6 +333,10 @@ app.post('/get-rate', async (req, res) => {
         if (matched) rateList = [matched];
 
         console.log('[GET-RATE] OK ' + order.shipmentOrderCode + ' - ' + rateList.length + ' rates');
+        if (rateList.length && order.shipmentOrderCode) {
+          rateCache[order.shipmentOrderCode] = rateList[0].totalCost;
+          console.log('[GET-RATE] Cached rate $' + rateList[0].totalCost + ' for ' + order.shipmentOrderCode);
+        }
         if (!rateList.length) msg = 'No OnTrac rates available for this destination';
 
       } catch (e) {
@@ -493,7 +498,9 @@ app.post('/create-label', async (req, res) => {
         }
 
         const proxyLabelUrl = MIDDLEWARE_URL + '/label/' + trk;
-        const totalCost = (ontracOrder.Charges || []).reduce((s, c) => s + (parseFloat(c.Amount) || 0), 0);
+        // OnTrac PlaceOrder response does not include Charges — use rate cached from get-rate
+        const totalCost = rateCache[order.shipmentOrderCode] || 0;
+        delete rateCache[order.shipmentOrderCode];
         console.log('[CREATE-LABEL] SUCCESS tracking=' + trk + ' cost=$' + totalCost + ' labelUrl=' + proxyLabelUrl);
 
         out.push({
