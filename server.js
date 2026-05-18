@@ -159,6 +159,15 @@ function weightToLbs(value, unit) {
   return Math.max(v, 0.1);
 }
 
+// Compute transit days from an OnTrac UTCExpectedDeliveryBy ISO string
+function transitDaysFromUTC(utcStr) {
+  if (!utcStr) return 0;
+  const delivery = new Date(utcStr);
+  if (isNaN(delivery.getTime())) return 0;
+  const days = Math.ceil((delivery.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+  return days > 0 ? days : 0;
+}
+
 // Map Logiwa shippingOption string -> ONTrac ServiceCode
 function mapServiceCode(s) {
   if (!s) return 'GRND';
@@ -306,6 +315,7 @@ app.post('/get-rate', async (req, res) => {
 
         rateList = services.map(svc => {
           const totalCost = (svc.Charges || []).reduce((sum, c) => sum + (parseFloat(c.Amount) || 0), 0);
+          const estimatedDays = transitDaysFromUTC(svc.UTCExpectedDeliveryBy);
           return {
             carrier:        'ONTRAC - REG',
             shippingOption: svc.ServiceCode,
@@ -313,7 +323,7 @@ app.post('/get-rate', async (req, res) => {
             shippingCost:   totalCost,
             otherCost:      0,
             currency:       svc.Charges?.[0]?.Currency || 'USD',
-            estimatedDays:  0,
+            estimatedDays,
           };
         });
 
