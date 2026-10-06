@@ -26,14 +26,69 @@ const ONTRAC_WSKEY           = process.env.ONTRAC_WSKEY;
 const ONTRAC_CUSTOMER_BRANCH = process.env.ONTRAC_CUSTOMER_BRANCH;
 const PORT = process.env.PORT || 3000;
 
-const ONTRAC_BASE_URL = 'https://ws.ontrac.com';
+const ONTRAC_BASE_URL = process.env.ONTRAC_BASE_URL || 'https://ws.ontrac.com';
+
+// What to tell Logiwa when OnTrac will not price a package ("NoRate"):
+//   unavailable (default) -> no rate, so rate shopping picks another carrier
+//   zero                  -> the old behaviour: a $0 rate. A $0 rate wins every rate shop,
+//                            so only use this as a deliberate, temporary override.
+const NORATE_MODE     = (process.env.ONTRAC_NORATE_MODE || 'unavailable').toLowerCase();
+// Retry on NoRate is OFF by default so a refused package adds no time to rate shopping.
+// ONTRAC_NORATE_RETRY=1 turns on one retry after NORATE_RETRY_MS.
+const NORATE_RETRY    = process.env.ONTRAC_NORATE_RETRY === '1';
+const NORATE_RETRY_MS = parseInt(process.env.ONTRAC_NORATE_RETRY_MS || '250', 10);
+// Hard cap on the EXTRA OnTrac calls the safeguards add (the retry, and the re-check at label
+// time), so a slow OnTrac can never hold a packer up. The normal first rate call is unchanged.
+const EXTRA_CALL_TIMEOUT_MS = parseInt(process.env.ONTRAC_EXTRA_CALL_TIMEOUT_MS || '1500', 10);
+const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL || '';
 
 const MIDDLEWARE_URL = process.env.RAILWAY_PUBLIC_DOMAIN
   ? 'https://' + process.env.RAILWAY_PUBLIC_DOMAIN
   : (process.env.MIDDLEWARE_URL || 'https://ontrac-logiwa-middleware-production.up.railway.app');
 
 const labelCache = {};
-const rateCache  = {}; // orderCode -> totalCost, populated by get-rate, consumed by create-label
+const rateCache  = {}; // orderCode -> { cost, at }, populated by get-rate, read by create-label
+const RATE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
+function rememberRate(orderCode, cost) {
+  if (!orderCode || !(cost > 0)) return;
+  rateCache[orderCode] = { cost, at: Date.now() };
+}
+// Kept (not deleted) after a label so a second box or a reprint still has its price.
+function recallRate(orderCode) {
+  const hit = rateCache[orderCode];
+  if (!hit) return null;
+  if (Date.now() - hit.at > RATE_CACHE_TTL_MS) { delete rateCache[orderCode]; return null; }
+  return hit.cost;
+}
+setInterval(() => {
+  const cutoff = Date.now() - RATE_CACHE_TTL_MS;
+  for (const k of Object.keys(rateCache)) if (rateCache[k].at < cutoff) delete rateCache[k];
+}, 60 * 60 * 1000).unref();
+
+// --- ALERTS -------------------------------------------------------------------
+// Rate problems are collected and posted to Slack at most once a minute, so a bad
+// afternoon is one short stream of messages, not one per package. No webhook = log only.
+const pendingAlerts = [];
+function alertRateProblem(kind, orderCode, detail) {
+  console.warn('[ALERT] ' + kind + ' order=' + orderCode + (detail ? ' ' + detail : ''));
+  pendingAlerts.push({ kind, orderCode, detail });
+}
+async function flushAlerts() {
+  if (!pendingAlerts.length) return;
+  const batch = pendingAlerts.splice(0, pendingAlerts.length);
+  if (!SLACK_WEBHOOK_URL) return;
+  const byKind = {};
+  for (const a of batch) (byKind[a.kind] = byKind[a.kind] || []).push(a.orderCode);
+  const lines = Object.entries(byKind).map(([k, codes]) =>
+    '• ' + k + ': ' + codes.length + ' (' + codes.slice(0, 8).join(', ') + (codes.length > 8 ? ', …' : '') + ')');
+  try {
+    await axios.post(SLACK_WEBHOOK_URL, { text: ':warning: OnTrac rate problem (last minute)\n' + lines.join('\n') }, { timeout: 5000 });
+  } catch (e) {
+    console.error('[ALERT] Slack post failed: ' + e.message);
+  }
+}
+setInterval(flushAlerts, 60 * 1000).unref();
 
 // --- SHIPFLOW WAREHOUSE DEFAULTS ----------------------------------------------
 
@@ -228,12 +283,80 @@ function buildPiece(pkg) {
   return piece;
 }
 
+// --- ONTRAC RATE LOOKUP -------------------------------------------------------
+// One place that asks OnTrac for a price. Returns
+//   { services: [{ ServiceCode, totalCost, currency, estimatedDays }] }  on success
+//   { noRate: true }                 OnTrac answered "NoRate"
+//   { error: '<message>' }           anything else
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function fetchOnTracRates(order, tag, opts = {}) {
+  const pkg       = order.requestedPackageLineItems?.[0] || {};
+  const shipTo    = getAddr(order.shipTo);
+  const toContact = getContact(order.shipTo);
+  const rateReq = {
+    CustomerBranch: ONTRAC_CUSTOMER_BRANCH,
+    TenderDateTime: tenderDateTime(),
+    TenderAt:       { ...DEFAULT_FROM },
+    DeliverTo: {
+      Contact:        toContact.name    || 'Recipient',
+      Company:        toContact.company || '',
+      StreetAddress:  shipTo.address1   || '',
+      Address2:       shipTo.address2   || '',
+      PostalCode:     shipTo.postalCode || '',
+      City:           shipTo.city       || '',
+      State:          shipTo.state      || '',
+      ISOCountryCode: shipTo.country    || 'US',
+      Phone:          toContact.phone   || '',
+      Email:          toContact.email   || '',
+    },
+    Pieces: [buildPiece(pkg)],
+  };
+  const rateUrl = ONTRAC_BASE_URL + '/Method/ServicesAndCharges/v3/json/' + ONTRAC_WSID + '/' + ONTRAC_WSKEY;
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    logRequest(tag, 'POST', rateUrl.replace(ONTRAC_WSKEY, '***WSKey***'), rateReq);
+    try {
+      // Only the extra calls are capped: the retry, and every call made at label time.
+      const capped = attempt > 1 || opts.extra;
+      const rateRes = await axios.post(rateUrl, rateReq, {
+        headers: { 'Content-Type': 'application/json' },
+        ...(capped ? { timeout: EXTRA_CALL_TIMEOUT_MS } : {}),
+      });
+      logResponse(tag, rateRes.status, rateRes.data);
+      // ServicesAndCharges is an object keyed by service code, not an array
+      const svcObj = rateRes.data?.ServicesAndCharges || {};
+      const list = Array.isArray(svcObj)
+        ? svcObj
+        : Object.entries(svcObj).map(([code, svc]) => ({ ServiceCode: code, ...svc }));
+      const services = list.map(svc => ({
+        ServiceCode:   svc.ServiceCode,
+        totalCost:     (svc.Charges || []).reduce((sum, c) => sum + (parseFloat(c.Amount) || 0), 0),
+        currency:      svc.Charges?.[0]?.Currency || 'USD',
+        estimatedDays: transitDaysFromUTC(svc.UTCExpectedDeliveryBy),
+      }));
+      return { services };
+    } catch (e) {
+      logError(tag, e);
+      const isNoRate = e.response?.data?.ErrorMessage === 'NoRate';
+      if (isNoRate && attempt === 1 && NORATE_RETRY && !opts.noRetry) {
+        console.log('[' + tag + '] NoRate from OnTrac — retrying once in ' + NORATE_RETRY_MS + 'ms');
+        await sleep(NORATE_RETRY_MS);
+        continue;
+      }
+      if (isNoRate) return { noRate: true };
+      return { error: e.response?.data?.ErrorMessage || e.message };
+    }
+  }
+  return { noRate: true };
+}
+
 // --- HEALTH CHECK -------------------------------------------------------------
 
 app.get('/', (req, res) => res.json({
   status:          'running',
   service:         'OnTrac <-> Logiwa Middleware',
-  version:         '1.0.1',
+  version: '1.1.0',
   customerBranch:  ONTRAC_CUSTOMER_BRANCH,
   injectionFacility: INJECTION_FACILITY_CODE,
 }));
@@ -269,65 +392,23 @@ app.post('/get-rate', async (req, res) => {
     const out = [];
 
     for (const order of orders) {
-      const pkg       = order.requestedPackageLineItems?.[0] || {};
-      const shipTo    = getAddr(order.shipTo);
-      const toContact = getContact(order.shipTo);
-      const piece     = buildPiece(pkg);
-
-      const tender    = tenderDateTime();
-      console.log('[GET-RATE] TenderDateTime=' + tender);
-
-      const rateReq = {
-        CustomerBranch: ONTRAC_CUSTOMER_BRANCH,
-        TenderDateTime: tender,
-        TenderAt:       { ...DEFAULT_FROM },
-        DeliverTo: {
-          Contact:        toContact.name    || 'Recipient',
-          Company:        toContact.company || '',
-          StreetAddress:  shipTo.address1   || '',
-          Address2:       shipTo.address2   || '',
-          PostalCode:     shipTo.postalCode || '',
-          City:           shipTo.city       || '',
-          State:          shipTo.state      || '',
-          ISOCountryCode: shipTo.country    || 'US',
-          Phone:          toContact.phone   || '',
-          Email:          toContact.email   || '',
-        },
-        Pieces: [piece],
-      };
-
-      const rateUrl = ONTRAC_BASE_URL + '/Method/ServicesAndCharges/v3/json/'
-        + ONTRAC_WSID + '/' + ONTRAC_WSKEY;
-      logRequest('GET-RATE', 'POST', rateUrl.replace(ONTRAC_WSKEY, '***WSKey***'), rateReq);
-
       let rateList = [], msg = '';
-      try {
-        const rateRes = await axios.post(rateUrl, rateReq, {
-          headers: { 'Content-Type': 'application/json' },
-        });
-        logResponse('GET-RATE', rateRes.status, rateRes.data);
+      const requestedService = mapServiceCode(order.shippingOption);
+      const result = await fetchOnTracRates(order, 'GET-RATE');
 
-        // ServicesAndCharges is an object keyed by service code, not an array
-        const svcObj = rateRes.data?.ServicesAndCharges || {};
-        const services = Array.isArray(svcObj)
-          ? svcObj
-          : Object.entries(svcObj).map(([code, svc]) => ({ ServiceCode: code, ...svc }));
-
-        const requestedService = mapServiceCode(order.shippingOption);
-
-        rateList = services.map(svc => {
-          const totalCost = (svc.Charges || []).reduce((sum, c) => sum + (parseFloat(c.Amount) || 0), 0);
-          const estimatedDays = transitDaysFromUTC(svc.UTCExpectedDeliveryBy);
-          return {
+      if (result.services) {
+        rateList = result.services
+          // A service OnTrac lists with no charges is not a price — never pass $0 on.
+          .filter(svc => svc.totalCost > 0)
+          .map(svc => ({
             carrier:        order.carrier || 'OnTrac',
             shippingOption: svc.ServiceCode,
-            totalCost,
-            shippingCost:   totalCost,
+            totalCost:      svc.totalCost,
+            shippingCost:   svc.totalCost,
             otherCost:      0,
-            currency:       svc.Charges?.[0]?.Currency || 'USD',
-            estimatedDays,
-          };
-        });
+            currency:       svc.currency,
+            estimatedDays:  svc.estimatedDays,
+          }));
 
         // Prefer the requested service if available
         const matched = rateList.find(r => r.shippingOption === requestedService);
@@ -335,31 +416,33 @@ app.post('/get-rate', async (req, res) => {
 
         console.log('[GET-RATE] OK ' + order.shipmentOrderCode + ' - ' + rateList.length + ' rates');
         if (rateList.length && order.shipmentOrderCode) {
-          rateCache[order.shipmentOrderCode] = rateList[0].totalCost;
+          rememberRate(order.shipmentOrderCode, rateList[0].totalCost);
           console.log('[GET-RATE] Cached rate $' + rateList[0].totalCost + ' for ' + order.shipmentOrderCode);
         }
         if (!rateList.length) msg = 'No OnTrac rates available for this destination';
 
-      } catch (e) {
-        logError('GET-RATE', e);
-        const isNoRate = e.response?.data?.ErrorMessage === 'NoRate';
-        if (isNoRate) {
-          // OnTrac has no rate for this route but PlaceOrder may still succeed.
-          // Return a $0 stub so Logiwa can proceed to create-label.
-          const svcCode = mapServiceCode(order.shippingOption);
+      } else if (result.noRate) {
+        alertRateProblem('NoRate on get-rate', order.shipmentOrderCode,
+          'zip=' + (getAddr(order.shipTo).postalCode || '?') + ' mode=' + NORATE_MODE);
+        if (NORATE_MODE === 'zero') {
+          // Deliberate override only (ONTRAC_NORATE_MODE=zero): a $0 stub so the label can
+          // still be made. This makes OnTrac the cheapest option in every rate shop.
           rateList = [{
             carrier:        order.carrier || 'OnTrac',
-            shippingOption: svcCode,
+            shippingOption: requestedService,
             totalCost:      0,
             shippingCost:   0,
             otherCost:      0,
             currency:       'USD',
             estimatedDays:  0,
           }];
-          console.log('[GET-RATE] NoRate from OnTrac — returning $0 stub for ' + svcCode);
+          console.log('[GET-RATE] NoRate from OnTrac — returning $0 stub for ' + requestedService + ' (ONTRAC_NORATE_MODE=zero)');
         } else {
-          msg = 'OnTrac error: ' + (e.response?.data?.ErrorMessage || e.message);
+          msg = 'OnTrac could not price this package (NoRate) — not offering OnTrac for this order';
+          console.log('[GET-RATE] NoRate from OnTrac — returning no rate for ' + order.shipmentOrderCode);
         }
+      } else {
+        msg = 'OnTrac error: ' + result.error;
       }
 
       out.push({
@@ -500,8 +583,23 @@ app.post('/create-label', async (req, res) => {
 
         const proxyLabelUrl = MIDDLEWARE_URL + '/label/' + trk;
         // OnTrac PlaceOrder response does not include Charges — use rate cached from get-rate
-        const totalCost = rateCache[order.shipmentOrderCode] || 0;
-        delete rateCache[order.shipmentOrderCode];
+        // If the price is not remembered (middleware restarted, or the label was made without
+        // a rate shop), ask OnTrac again rather than reporting $0.
+        let totalCost = recallRate(order.shipmentOrderCode);
+        if (totalCost == null) {
+          console.log('[CREATE-LABEL] No remembered rate for ' + order.shipmentOrderCode + ' — asking OnTrac again');
+          const again = await fetchOnTracRates(order, 'CREATE-LABEL-RATE', { extra: true, noRetry: true }).catch(e => ({ error: e.message }));
+          const svc = (again.services || []).find(x => x.ServiceCode === svcCode) || (again.services || [])[0];
+          if (svc && svc.totalCost > 0) {
+            totalCost = svc.totalCost;
+            rememberRate(order.shipmentOrderCode, totalCost);
+          }
+        }
+        if (totalCost == null) {
+          // The label is already made, so the package ships; the cost is unknown, not free.
+          totalCost = 0;
+          alertRateProblem('Label made with no price', order.shipmentOrderCode, 'tracking=' + trk);
+        }
         console.log('[CREATE-LABEL] SUCCESS tracking=' + trk + ' cost=$' + totalCost + ' labelUrl=' + proxyLabelUrl);
 
         out.push({
@@ -616,10 +714,13 @@ app.post('/end-of-day-report', (req, res) => {
 
 // --- START --------------------------------------------------------------------
 
-app.listen(PORT, () => {
-  console.log('\nOnTrac-Logiwa Middleware v1.0.1 on port ' + PORT);
+if (require.main === module) app.listen(PORT, () => {
+  console.log('\nOnTrac-Logiwa Middleware v1.1.0 on port ' + PORT);
+  console.log('   NoRate mode      : ' + NORATE_MODE + (SLACK_WEBHOOK_URL ? ' (Slack alerts on)' : ' (Slack alerts off — no SLACK_WEBHOOK_URL)') + ', retry ' + (NORATE_RETRY ? 'on' : 'off'));
   console.log('   Label proxy      : ' + MIDDLEWARE_URL + '/label/:id');
   console.log('   Customer Branch  : ' + ONTRAC_CUSTOMER_BRANCH);
   console.log('   Injection Facility: ' + INJECTION_FACILITY_CODE);
   console.log('   Base URL         : ' + ONTRAC_BASE_URL + '\n');
 });
+
+module.exports = { app, flushAlerts };
