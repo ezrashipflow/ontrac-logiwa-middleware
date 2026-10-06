@@ -356,7 +356,7 @@ async function fetchOnTracRates(order, tag, opts = {}) {
 app.get('/', (req, res) => res.json({
   status:          'running',
   service:         'OnTrac <-> Logiwa Middleware',
-  version:         '1.0.1',
+  version: '1.1.0',
   customerBranch:  ONTRAC_CUSTOMER_BRANCH,
   injectionFacility: INJECTION_FACILITY_CODE,
 }));
