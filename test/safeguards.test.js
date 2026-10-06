@@ -87,8 +87,9 @@ test('a second label for the same order still has its price', async () => {
 });
 
 test('label when OnTrac still will not price it: label is made, and Slack is told', async () => {
-  script.F1 = ['norate', 'norate'];
+  script.F1 = ['norate'];
   const l = await label(order('F1'));
+  assert.equal(rateCalls.F1, 1, 'one re-check only at label time, no retry');
   assert.equal(l.isSuccessful, true, 'the package still ships');
   assert.equal(l.masterTrackingNumber, 'TRK-F1');
   assert.equal(l.rateDetail.totalCost, 0);

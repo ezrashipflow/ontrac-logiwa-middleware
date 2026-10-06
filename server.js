@@ -33,7 +33,10 @@ const ONTRAC_BASE_URL = process.env.ONTRAC_BASE_URL || 'https://ws.ontrac.com';
 //   zero                  -> the old behaviour: a $0 rate. A $0 rate wins every rate shop,
 //                            so only use this as a deliberate, temporary override.
 const NORATE_MODE     = (process.env.ONTRAC_NORATE_MODE || 'unavailable').toLowerCase();
-const NORATE_RETRY_MS = parseInt(process.env.ONTRAC_NORATE_RETRY_MS || '800', 10);
+const NORATE_RETRY_MS = parseInt(process.env.ONTRAC_NORATE_RETRY_MS || '250', 10);
+// Hard cap on the EXTRA OnTrac calls the safeguards add (the retry, and the re-check at label
+// time), so a slow OnTrac can never hold a packer up. The normal first rate call is unchanged.
+const EXTRA_CALL_TIMEOUT_MS = parseInt(process.env.ONTRAC_EXTRA_CALL_TIMEOUT_MS || '1500', 10);
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL || '';
 
 const MIDDLEWARE_URL = process.env.RAILWAY_PUBLIC_DOMAIN
@@ -284,7 +287,7 @@ function buildPiece(pkg) {
 //   { error: '<message>' }           anything else
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-async function fetchOnTracRates(order, tag) {
+async function fetchOnTracRates(order, tag, opts = {}) {
   const pkg       = order.requestedPackageLineItems?.[0] || {};
   const shipTo    = getAddr(order.shipTo);
   const toContact = getContact(order.shipTo);
@@ -311,7 +314,12 @@ async function fetchOnTracRates(order, tag) {
   for (let attempt = 1; attempt <= 2; attempt++) {
     logRequest(tag, 'POST', rateUrl.replace(ONTRAC_WSKEY, '***WSKey***'), rateReq);
     try {
-      const rateRes = await axios.post(rateUrl, rateReq, { headers: { 'Content-Type': 'application/json' } });
+      // Only the extra calls are capped: the retry, and every call made at label time.
+      const capped = attempt > 1 || opts.extra;
+      const rateRes = await axios.post(rateUrl, rateReq, {
+        headers: { 'Content-Type': 'application/json' },
+        ...(capped ? { timeout: EXTRA_CALL_TIMEOUT_MS } : {}),
+      });
       logResponse(tag, rateRes.status, rateRes.data);
       // ServicesAndCharges is an object keyed by service code, not an array
       const svcObj = rateRes.data?.ServicesAndCharges || {};
@@ -328,7 +336,7 @@ async function fetchOnTracRates(order, tag) {
     } catch (e) {
       logError(tag, e);
       const isNoRate = e.response?.data?.ErrorMessage === 'NoRate';
-      if (isNoRate && attempt === 1) {
+      if (isNoRate && attempt === 1 && !opts.noRetry) {
         console.log('[' + tag + '] NoRate from OnTrac — retrying once in ' + NORATE_RETRY_MS + 'ms');
         await sleep(NORATE_RETRY_MS);
         continue;
@@ -577,7 +585,7 @@ app.post('/create-label', async (req, res) => {
         let totalCost = recallRate(order.shipmentOrderCode);
         if (totalCost == null) {
           console.log('[CREATE-LABEL] No remembered rate for ' + order.shipmentOrderCode + ' — asking OnTrac again');
-          const again = await fetchOnTracRates(order, 'CREATE-LABEL-RATE').catch(e => ({ error: e.message }));
+          const again = await fetchOnTracRates(order, 'CREATE-LABEL-RATE', { extra: true, noRetry: true }).catch(e => ({ error: e.message }));
           const svc = (again.services || []).find(x => x.ServiceCode === svcCode) || (again.services || [])[0];
           if (svc && svc.totalCost > 0) {
             totalCost = svc.totalCost;
