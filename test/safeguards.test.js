@@ -54,20 +54,13 @@ test('a priced package: rate goes to Logiwa and the label carries the same cost'
   assert.equal(l.rateDetail.totalCost.toFixed(2), '6.68');
 });
 
-test('NoRate twice: OnTrac is NOT offered, and never at $0', async () => {
-  script.B1 = ['norate', 'norate'];
+test('NoRate: OnTrac is NOT offered, never at $0, and no second call is made', async () => {
+  script.B1 = ['norate'];
   const r = await rate(order('B1'));
   assert.equal(r.isSuccessful, false);
   assert.deepEqual(r.rateList, []);
   assert.match(r.message[0], /NoRate/);
-  assert.equal(rateCalls.B1, 2, 'retried exactly once');
-});
-
-test('NoRate then a price: the retry rescues it', async () => {
-  script.C1 = ['norate', 'ok'];
-  const r = await rate(order('C1'));
-  assert.equal(r.isSuccessful, true);
-  assert.equal(r.rateList[0].totalCost.toFixed(2), '6.68');
+  assert.equal(rateCalls.B1, 1, 'no retry by default — no added time');
 });
 
 test('label with no remembered price: asks OnTrac again instead of sending $0', async () => {

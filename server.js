@@ -33,6 +33,9 @@ const ONTRAC_BASE_URL = process.env.ONTRAC_BASE_URL || 'https://ws.ontrac.com';
 //   zero                  -> the old behaviour: a $0 rate. A $0 rate wins every rate shop,
 //                            so only use this as a deliberate, temporary override.
 const NORATE_MODE     = (process.env.ONTRAC_NORATE_MODE || 'unavailable').toLowerCase();
+// Retry on NoRate is OFF by default so a refused package adds no time to rate shopping.
+// ONTRAC_NORATE_RETRY=1 turns on one retry after NORATE_RETRY_MS.
+const NORATE_RETRY    = process.env.ONTRAC_NORATE_RETRY === '1';
 const NORATE_RETRY_MS = parseInt(process.env.ONTRAC_NORATE_RETRY_MS || '250', 10);
 // Hard cap on the EXTRA OnTrac calls the safeguards add (the retry, and the re-check at label
 // time), so a slow OnTrac can never hold a packer up. The normal first rate call is unchanged.
@@ -283,7 +286,7 @@ function buildPiece(pkg) {
 // --- ONTRAC RATE LOOKUP -------------------------------------------------------
 // One place that asks OnTrac for a price. Returns
 //   { services: [{ ServiceCode, totalCost, currency, estimatedDays }] }  on success
-//   { noRate: true }                 OnTrac answered "NoRate" (after one retry)
+//   { noRate: true }                 OnTrac answered "NoRate"
 //   { error: '<message>' }           anything else
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -336,7 +339,7 @@ async function fetchOnTracRates(order, tag, opts = {}) {
     } catch (e) {
       logError(tag, e);
       const isNoRate = e.response?.data?.ErrorMessage === 'NoRate';
-      if (isNoRate && attempt === 1 && !opts.noRetry) {
+      if (isNoRate && attempt === 1 && NORATE_RETRY && !opts.noRetry) {
         console.log('[' + tag + '] NoRate from OnTrac — retrying once in ' + NORATE_RETRY_MS + 'ms');
         await sleep(NORATE_RETRY_MS);
         continue;
@@ -436,7 +439,7 @@ app.post('/get-rate', async (req, res) => {
           console.log('[GET-RATE] NoRate from OnTrac — returning $0 stub for ' + requestedService + ' (ONTRAC_NORATE_MODE=zero)');
         } else {
           msg = 'OnTrac could not price this package (NoRate) — not offering OnTrac for this order';
-          console.log('[GET-RATE] NoRate from OnTrac after retry — returning no rate for ' + order.shipmentOrderCode);
+          console.log('[GET-RATE] NoRate from OnTrac — returning no rate for ' + order.shipmentOrderCode);
         }
       } else {
         msg = 'OnTrac error: ' + result.error;
@@ -713,7 +716,7 @@ app.post('/end-of-day-report', (req, res) => {
 
 if (require.main === module) app.listen(PORT, () => {
   console.log('\nOnTrac-Logiwa Middleware v1.1.0 on port ' + PORT);
-  console.log('   NoRate mode      : ' + NORATE_MODE + (SLACK_WEBHOOK_URL ? ' (Slack alerts on)' : ' (Slack alerts off — no SLACK_WEBHOOK_URL)'));
+  console.log('   NoRate mode      : ' + NORATE_MODE + (SLACK_WEBHOOK_URL ? ' (Slack alerts on)' : ' (Slack alerts off — no SLACK_WEBHOOK_URL)') + ', retry ' + (NORATE_RETRY ? 'on' : 'off'));
   console.log('   Label proxy      : ' + MIDDLEWARE_URL + '/label/:id');
   console.log('   Customer Branch  : ' + ONTRAC_CUSTOMER_BRANCH);
   console.log('   Injection Facility: ' + INJECTION_FACILITY_CODE);
