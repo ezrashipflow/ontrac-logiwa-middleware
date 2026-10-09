@@ -39,6 +39,7 @@ before(async () => {
     ONTRAC_NORATE_RETRY_MS: '10', SLACK_WEBHOOK_URL: 'http://127.0.0.1:' + port + '/slack',
   });
   delete process.env.ONTRAC_NORATE_MODE;
+  delete process.env.ONTRAC_HAZMAT_SIGNATURE;
   const { app, flushAlerts } = require('../server.js');
   global.flushAlerts = flushAlerts;
   await new Promise(r => { mw = app.listen(0, r); });
@@ -97,15 +98,15 @@ test('label when OnTrac still will not price it: label is made, and Slack is tol
   assert.match(text, /NoRate on get-rate/);       // from the B1 case above
 });
 
-test('hazmat: the piece is declared to OnTrac as Hazmat + SignatureRequired on rate and label', async () => {
+test('hazmat: the piece is declared to OnTrac as Hazmat, with no signature, on rate and label', async () => {
   const o = order('H1');
   o.requestedPackageLineItems[0].products = [{ sku: '02671', quantity: 1, isHazardous: true }];
   const r = await rate(o);
   assert.equal(r.isSuccessful, true);
-  assert.deepEqual(seenAttributes.rate.H1, ['Hazmat', 'SignatureRequired']);
+  assert.deepEqual(seenAttributes.rate.H1, ['Hazmat']);
   const l = await label(o);
   assert.equal(l.isSuccessful, true);
-  assert.deepEqual(seenAttributes.label.H1, ['Hazmat', 'SignatureRequired']);
+  assert.deepEqual(seenAttributes.label.H1, ['Hazmat']);
 });
 
 test('non-hazmat products are sent with no attributes', async () => {

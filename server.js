@@ -228,10 +228,11 @@ function transitDaysFromUTC(utcStr) {
 // Logiwa flags hazmat per product (isHazardous + hazmat* fields) on each box's
 // products[] and on internationalOptions.customsItems. OnTrac takes the
 // declaration as the piece attribute "Hazmat", on the rate AND the order.
-// OnTrac's docs say "Also include signature required with this option"; the
-// signature adds about $9 to the quote (checked live), so it is a switch:
-// ONTRAC_HAZMAT_SIGNATURE=0 sends "Hazmat" alone.
-const HAZMAT_SIGNATURE = process.env.ONTRAC_HAZMAT_SIGNATURE !== '0';
+// We send "Hazmat" alone. OnTrac's docs say "Also include signature required
+// with this option", but its API accepts Hazmat without it and the signature
+// adds about $9 to the quote (both checked live), so the signature is opt-in:
+// ONTRAC_HAZMAT_SIGNATURE=1 adds "SignatureRequired".
+const HAZMAT_SIGNATURE = process.env.ONTRAC_HAZMAT_SIGNATURE === '1';
 
 function isHazmatLine(p) {
   return !!p && (p.isHazardous === true || String(p.isHazardous).toLowerCase() === 'true'
