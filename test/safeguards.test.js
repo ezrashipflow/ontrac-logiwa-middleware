@@ -7,6 +7,7 @@ const axios   = require('axios');
 let mock, mw, base, slackPosts = [];
 const script = {};          // orderCode -> array of rate answers ('ok' | 'norate'), consumed in order
 const rateCalls = {};
+const seenAttributes = { rate: {}, label: {} };   // orderCode -> piece Attributes OnTrac was sent
 
 const order = (code, zip = '19807') => ({
   shipmentOrderCode: code, shipmentOrderIdentifier: 'id-' + code, carrier: 'OnTrac', shippingOption: 'GRND',
@@ -19,13 +20,16 @@ before(async () => {
   fake.post('/Method/ServicesAndCharges/v3/json/:id/:key', (req, res) => {
     const code = req.body.DeliverTo.Contact;
     rateCalls[code] = (rateCalls[code] || 0) + 1;
+    seenAttributes.rate[code] = req.body.Pieces[0].Attributes;
     const next = (script[code] || []).shift() || 'ok';
     if (next === 'norate') return res.status(400).json({ Error: true, ErrorMessage: 'NoRate' });
     res.json({ Error: false, ServicesAndCharges: { GRND: { UTCExpectedDeliveryBy: '2030-01-02T22:00:00',
       Charges: [{ ChargeCode: 'BS', Amount: 4.96, Currency: 'USD' }, { ChargeCode: 'EN', Amount: 1.06, Currency: 'USD' }, { ChargeCode: 'RC', Amount: 0.66, Currency: 'USD' }] } } });
   });
-  fake.post('/Method/PlaceOrder/v3/json/:id/:key/:t/:l/:fmt', (req, res) =>
-    res.json({ Error: false, Order: { Pieces: [{ Barcode: 'TRK-' + req.body.Reference1, Label: Buffer.from('pdf').toString('base64') }] } }));
+  fake.post('/Method/PlaceOrder/v3/json/:id/:key/:t/:l/:fmt', (req, res) => {
+    seenAttributes.label[req.body.Reference1] = req.body.Pieces[0].Attributes;
+    res.json({ Error: false, Order: { Pieces: [{ Barcode: 'TRK-' + req.body.Reference1, Label: Buffer.from('pdf').toString('base64') }] } });
+  });
   fake.post('/slack', (req, res) => { slackPosts.push(req.body.text); res.json({ ok: true }); });
   await new Promise(r => { mock = fake.listen(0, r); });
   const port = mock.address().port;
@@ -93,22 +97,21 @@ test('label when OnTrac still will not price it: label is made, and Slack is tol
   assert.match(text, /NoRate on get-rate/);       // from the B1 case above
 });
 
-test('hazmat: no rate and no label, and OnTrac is never called', async () => {
+test('hazmat: the piece is declared to OnTrac as Hazmat + SignatureRequired on rate and label', async () => {
   const o = order('H1');
   o.requestedPackageLineItems[0].products = [{ sku: '02671', quantity: 1, isHazardous: true }];
   const r = await rate(o);
-  assert.equal(r.isSuccessful, false);
-  assert.equal(r.rateList.length, 0);
-  assert.match(r.message[0], /Hazmat item on order \(02671\)/);
+  assert.equal(r.isSuccessful, true);
+  assert.deepEqual(seenAttributes.rate.H1, ['Hazmat', 'SignatureRequired']);
   const l = await label(o);
-  assert.equal(l.isSuccessful, false);
-  assert.equal(l.masterTrackingNumber, '');
-  assert.equal(rateCalls.H1, undefined);
+  assert.equal(l.isSuccessful, true);
+  assert.deepEqual(seenAttributes.label.H1, ['Hazmat', 'SignatureRequired']);
 });
 
-test('non-hazmat products do not trip the hazmat block', async () => {
+test('non-hazmat products are sent with no attributes', async () => {
   const o = order('H2');
   o.requestedPackageLineItems[0].products = [{ sku: 'ABC', quantity: 1, isHazardous: false, hazmatIdentificationNumber: null }];
   const r = await rate(o);
   assert.equal(r.isSuccessful, true);
+  assert.deepEqual(seenAttributes.rate.H2, []);
 });

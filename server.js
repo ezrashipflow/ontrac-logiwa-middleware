@@ -226,9 +226,12 @@ function transitDaysFromUTC(utcStr) {
 
 // --- HAZMAT -------------------------------------------------------------------
 // Logiwa flags hazmat per product (isHazardous + hazmat* fields) on each box's
-// products[] and on internationalOptions.customsItems. We send OnTrac no hazmat
-// declaration, so a hazmat order gets no rate (it drops out of Logiwa's rate
-// shop) and no label.
+// products[] and on internationalOptions.customsItems. OnTrac takes the
+// declaration as the piece attribute "Hazmat", on the rate AND the order.
+// OnTrac's docs say "Also include signature required with this option"; the
+// signature adds about $9 to the quote (checked live), so it is a switch:
+// ONTRAC_HAZMAT_SIGNATURE=0 sends "Hazmat" alone.
+const HAZMAT_SIGNATURE = process.env.ONTRAC_HAZMAT_SIGNATURE !== '0';
 
 function isHazmatLine(p) {
   return !!p && (p.isHazardous === true || String(p.isHazardous).toLowerCase() === 'true'
@@ -247,8 +250,10 @@ function hazmatSkus(order) {
   return [...new Set(orderProducts(order).filter(isHazmatLine).map(p => p.sku || p.description || 'unknown SKU'))];
 }
 
-function hazmatMessage(skus) {
-  return 'Hazmat item on order (' + skus.join(', ') + ') — OnTrac is not set up to ship hazardous materials';
+// Piece attributes for an order: [] unless it holds a hazmat product.
+function hazmatAttributes(order) {
+  if (!hazmatSkus(order).length) return [];
+  return HAZMAT_SIGNATURE ? ['Hazmat', 'SignatureRequired'] : ['Hazmat'];
 }
 
 // Map Logiwa shippingOption string -> ONTrac ServiceCode
@@ -279,7 +284,7 @@ function buildTenderAt(shipFrom) {
 }
 
 // Build a single ONTrac Piece from a Logiwa package line item
-function buildPiece(pkg) {
+function buildPiece(pkg, attributes = []) {
   const dims       = pkg.dimensions || {};
   const weightVal  = pkg.weight?.Value || pkg.weight?.value || 1;
   const weightUnit = (pkg.weight?.Units || pkg.weight?.units || 'LB').toUpperCase();
@@ -296,7 +301,7 @@ function buildPiece(pkg) {
     Description:             'Shipment',
     Reference:               '',
     ExpirationDate:          new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
-    Attributes:              [],
+    Attributes:              attributes,
   };
 
   if (l > 0 && w > 0 && h > 0) {
@@ -337,7 +342,7 @@ async function fetchOnTracRates(order, tag, opts = {}) {
       Phone:          toContact.phone   || '',
       Email:          toContact.email   || '',
     },
-    Pieces: [buildPiece(pkg)],
+    Pieces: [buildPiece(pkg, hazmatAttributes(order))],
   };
   const rateUrl = ONTRAC_BASE_URL + '/Method/ServicesAndCharges/v3/json/' + ONTRAC_WSID + '/' + ONTRAC_WSKEY;
 
@@ -421,17 +426,6 @@ app.post('/get-rate', async (req, res) => {
     for (const order of orders) {
       const hazmat = hazmatSkus(order);
       console.log('[GET-RATE] ' + order.shipmentOrderCode + ' products=' + orderProducts(order).length + ' hazmat=' + (hazmat.length ? hazmat.join(',') : 'no'));
-      if (hazmat.length) {
-        console.log('[GET-RATE] BLOCKED ' + order.shipmentOrderCode + ' — ' + hazmatMessage(hazmat));
-        out.push({
-          shipmentOrderCode:       order.shipmentOrderCode,
-          shipmentOrderIdentifier: order.shipmentOrderIdentifier,
-          rateList:     [],
-          isSuccessful: false,
-          message:      [hazmatMessage(hazmat)],
-        });
-        continue;
-      }
 
       let rateList = [], msg = '';
       const requestedService = mapServiceCode(order.shippingOption);
@@ -525,28 +519,13 @@ app.post('/create-label', async (req, res) => {
     const out = [];
 
     for (const order of orders) {
-      // Never buy a label for a hazmat order, even if Logiwa was pointed here by hand.
       const hazmat = hazmatSkus(order);
-      if (hazmat.length) {
-        console.log('[CREATE-LABEL] BLOCKED ' + order.shipmentOrderCode + ' — ' + hazmatMessage(hazmat));
-        out.push({
-          shipmentOrderIdentifier: order.shipmentOrderIdentifier,
-          shipmentOrderCode:       order.shipmentOrderCode,
-          carrier:        order.carrier || 'OnTrac',
-          shippingOption: order.shippingOption,
-          packageResponse: [],
-          rateDetail: { totalCost: 0, shippingCost: 0, otherCost: 0, currency: 'USD' },
-          masterTrackingNumber: '',
-          isSuccessful: false,
-          message: [hazmatMessage(hazmat)],
-        });
-        continue;
-      }
+      if (hazmat.length) console.log('[CREATE-LABEL] ' + order.shipmentOrderCode + ' hazmat=' + hazmat.join(',') + ' — declared to OnTrac as ' + hazmatAttributes(order).join('+'));
 
       const pkg       = order.requestedPackageLineItems?.[0] || {};
       const shipTo    = getAddr(order.shipTo);
       const toContact = getContact(order.shipTo);
-      const piece     = buildPiece(pkg);
+      const piece     = buildPiece(pkg, hazmatAttributes(order));
       const svcCode   = mapServiceCode(order.shippingOption);
       const tender    = tenderDateTime();
       const departure = expectedDepartureDateTime();
