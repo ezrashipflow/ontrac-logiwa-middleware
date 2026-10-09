@@ -92,3 +92,23 @@ test('label when OnTrac still will not price it: label is made, and Slack is tol
   assert.match(text, /F1/);
   assert.match(text, /NoRate on get-rate/);       // from the B1 case above
 });
+
+test('hazmat: no rate and no label, and OnTrac is never called', async () => {
+  const o = order('H1');
+  o.requestedPackageLineItems[0].products = [{ sku: '02671', quantity: 1, isHazardous: true }];
+  const r = await rate(o);
+  assert.equal(r.isSuccessful, false);
+  assert.equal(r.rateList.length, 0);
+  assert.match(r.message[0], /Hazmat item on order \(02671\)/);
+  const l = await label(o);
+  assert.equal(l.isSuccessful, false);
+  assert.equal(l.masterTrackingNumber, '');
+  assert.equal(rateCalls.H1, undefined);
+});
+
+test('non-hazmat products do not trip the hazmat block', async () => {
+  const o = order('H2');
+  o.requestedPackageLineItems[0].products = [{ sku: 'ABC', quantity: 1, isHazardous: false, hazmatIdentificationNumber: null }];
+  const r = await rate(o);
+  assert.equal(r.isSuccessful, true);
+});

@@ -224,6 +224,33 @@ function transitDaysFromUTC(utcStr) {
   return days > 0 ? days : 0;
 }
 
+// --- HAZMAT -------------------------------------------------------------------
+// Logiwa flags hazmat per product (isHazardous + hazmat* fields) on each box's
+// products[] and on internationalOptions.customsItems. We send OnTrac no hazmat
+// declaration, so a hazmat order gets no rate (it drops out of Logiwa's rate
+// shop) and no label.
+
+function isHazmatLine(p) {
+  return !!p && (p.isHazardous === true || String(p.isHazardous).toLowerCase() === 'true'
+    || !!p.hazmatIdentificationNumber || !!p.hazmatClassDivisionNumber);
+}
+
+function orderProducts(order) {
+  const boxes = Array.isArray(order.requestedPackageLineItems) ? order.requestedPackageLineItems : [];
+  const customs = order.internationalOptions?.customsItems;
+  return boxes.flatMap(b => Array.isArray(b.products) ? b.products : [])
+    .concat(Array.isArray(customs) ? customs : []);
+}
+
+// SKUs of the hazmat items on the order; empty when there are none.
+function hazmatSkus(order) {
+  return [...new Set(orderProducts(order).filter(isHazmatLine).map(p => p.sku || p.description || 'unknown SKU'))];
+}
+
+function hazmatMessage(skus) {
+  return 'Hazmat item on order (' + skus.join(', ') + ') — OnTrac is not set up to ship hazardous materials';
+}
+
 // Map Logiwa shippingOption string -> ONTrac ServiceCode
 function mapServiceCode(s) {
   if (!s) return 'GRND';
@@ -392,6 +419,20 @@ app.post('/get-rate', async (req, res) => {
     const out = [];
 
     for (const order of orders) {
+      const hazmat = hazmatSkus(order);
+      console.log('[GET-RATE] ' + order.shipmentOrderCode + ' products=' + orderProducts(order).length + ' hazmat=' + (hazmat.length ? hazmat.join(',') : 'no'));
+      if (hazmat.length) {
+        console.log('[GET-RATE] BLOCKED ' + order.shipmentOrderCode + ' — ' + hazmatMessage(hazmat));
+        out.push({
+          shipmentOrderCode:       order.shipmentOrderCode,
+          shipmentOrderIdentifier: order.shipmentOrderIdentifier,
+          rateList:     [],
+          isSuccessful: false,
+          message:      [hazmatMessage(hazmat)],
+        });
+        continue;
+      }
+
       let rateList = [], msg = '';
       const requestedService = mapServiceCode(order.shippingOption);
       const result = await fetchOnTracRates(order, 'GET-RATE');
@@ -484,6 +525,24 @@ app.post('/create-label', async (req, res) => {
     const out = [];
 
     for (const order of orders) {
+      // Never buy a label for a hazmat order, even if Logiwa was pointed here by hand.
+      const hazmat = hazmatSkus(order);
+      if (hazmat.length) {
+        console.log('[CREATE-LABEL] BLOCKED ' + order.shipmentOrderCode + ' — ' + hazmatMessage(hazmat));
+        out.push({
+          shipmentOrderIdentifier: order.shipmentOrderIdentifier,
+          shipmentOrderCode:       order.shipmentOrderCode,
+          carrier:        order.carrier || 'OnTrac',
+          shippingOption: order.shippingOption,
+          packageResponse: [],
+          rateDetail: { totalCost: 0, shippingCost: 0, otherCost: 0, currency: 'USD' },
+          masterTrackingNumber: '',
+          isSuccessful: false,
+          message: [hazmatMessage(hazmat)],
+        });
+        continue;
+      }
+
       const pkg       = order.requestedPackageLineItems?.[0] || {};
       const shipTo    = getAddr(order.shipTo);
       const toContact = getContact(order.shipTo);
