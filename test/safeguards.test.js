@@ -3,10 +3,13 @@ const { test, before, after } = require('node:test');
 const assert  = require('node:assert');
 const express = require('express');
 const axios   = require('axios');
+const { PDFDocument } = require('pdf-lib');
 
 let mock, mw, base, slackPosts = [];
+let onePagePdf;             // base64 of a real 1-page 4x6 PDF, standing in for OnTrac's label
 const script = {};          // orderCode -> array of rate answers ('ok' | 'norate'), consumed in order
 const rateCalls = {};
+const seenAttributes = { rate: {}, label: {} };   // orderCode -> piece Attributes OnTrac was sent
 
 const order = (code, zip = '19807') => ({
   shipmentOrderCode: code, shipmentOrderIdentifier: 'id-' + code, carrier: 'OnTrac', shippingOption: 'GRND',
@@ -15,17 +18,22 @@ const order = (code, zip = '19807') => ({
 });
 
 before(async () => {
+  const blank = await PDFDocument.create(); blank.addPage([288, 432]);
+  onePagePdf = Buffer.from(await blank.save()).toString('base64');
   const fake = express(); fake.use(express.json({ limit: '5mb' }));
   fake.post('/Method/ServicesAndCharges/v3/json/:id/:key', (req, res) => {
     const code = req.body.DeliverTo.Contact;
     rateCalls[code] = (rateCalls[code] || 0) + 1;
+    seenAttributes.rate[code] = req.body.Pieces[0].Attributes;
     const next = (script[code] || []).shift() || 'ok';
     if (next === 'norate') return res.status(400).json({ Error: true, ErrorMessage: 'NoRate' });
     res.json({ Error: false, ServicesAndCharges: { GRND: { UTCExpectedDeliveryBy: '2030-01-02T22:00:00',
       Charges: [{ ChargeCode: 'BS', Amount: 4.96, Currency: 'USD' }, { ChargeCode: 'EN', Amount: 1.06, Currency: 'USD' }, { ChargeCode: 'RC', Amount: 0.66, Currency: 'USD' }] } } });
   });
-  fake.post('/Method/PlaceOrder/v3/json/:id/:key/:t/:l/:fmt', (req, res) =>
-    res.json({ Error: false, Order: { Pieces: [{ Barcode: 'TRK-' + req.body.Reference1, Label: Buffer.from('pdf').toString('base64') }] } }));
+  fake.post('/Method/PlaceOrder/v3/json/:id/:key/:t/:l/:fmt', (req, res) => {
+    seenAttributes.label[req.body.Reference1] = req.body.Pieces[0].Attributes;
+    res.json({ Error: false, Order: { Pieces: [{ Barcode: 'TRK-' + req.body.Reference1, Label: onePagePdf }] } });
+  });
   fake.post('/slack', (req, res) => { slackPosts.push(req.body.text); res.json({ ok: true }); });
   await new Promise(r => { mock = fake.listen(0, r); });
   const port = mock.address().port;
@@ -35,6 +43,7 @@ before(async () => {
     ONTRAC_NORATE_RETRY_MS: '10', SLACK_WEBHOOK_URL: 'http://127.0.0.1:' + port + '/slack',
   });
   delete process.env.ONTRAC_NORATE_MODE;
+  delete process.env.ONTRAC_HAZMAT_SIGNATURE;
   const { app, flushAlerts } = require('../server.js');
   global.flushAlerts = flushAlerts;
   await new Promise(r => { mw = app.listen(0, r); });
@@ -44,6 +53,7 @@ after(() => { mock.close(); mw.close(); });
 
 const rate  = async o => (await axios.post(base + '/get-rate', [o])).data.data[0];
 const label = async o => (await axios.post(base + '/create-label', [o])).data.data[0];
+const pages = async l => (await PDFDocument.load(Buffer.from(l.packageResponse[0].encodedLabel, 'base64'))).getPageCount();
 
 test('a priced package: rate goes to Logiwa and the label carries the same cost', async () => {
   const r = await rate(order('A1'));
@@ -91,4 +101,25 @@ test('label when OnTrac still will not price it: label is made, and Slack is tol
   assert.match(text, /Label made with no price/);
   assert.match(text, /F1/);
   assert.match(text, /NoRate on get-rate/);       // from the B1 case above
+});
+
+test('hazmat: declared to OnTrac as Hazmat with no signature, and the label gains a Limited Quantity mark', async () => {
+  const o = order('H1');
+  o.requestedPackageLineItems[0].products = [{ sku: '02671', quantity: 1, isHazardous: true }];
+  const r = await rate(o);
+  assert.equal(r.isSuccessful, true);
+  assert.deepEqual(seenAttributes.rate.H1, ['Hazmat']);
+  const l = await label(o);
+  assert.equal(l.isSuccessful, true);
+  assert.deepEqual(seenAttributes.label.H1, ['Hazmat']);
+  assert.equal(await pages(l), 2, 'shipping label + Limited Quantity mark');
+});
+
+test('non-hazmat products are sent with no attributes', async () => {
+  const o = order('H2');
+  o.requestedPackageLineItems[0].products = [{ sku: 'ABC', quantity: 1, isHazardous: false, hazmatIdentificationNumber: null }];
+  const r = await rate(o);
+  assert.equal(r.isSuccessful, true);
+  assert.deepEqual(seenAttributes.rate.H2, []);
+  assert.equal(await pages(await label(o)), 1, 'no mark on a non-hazmat label');
 });
