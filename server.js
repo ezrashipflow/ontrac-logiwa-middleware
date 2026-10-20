@@ -257,6 +257,47 @@ function hazmatAttributes(order) {
   return HAZMAT_SIGNATURE ? ['Hazmat', 'SignatureRequired'] : ['Hazmat'];
 }
 
+// What we send OnTrac as hazmat. OnTrac publishes no hazmat acceptance list
+// (its terms, §7, take hazmat by prior notice and exempt Limited Quantity from
+// the SDS rule), so this keeps to consumer Limited Quantity / Small Quantity
+// goods by ground in the contiguous US, the same scope as our other carriers:
+//   - Ground (GRND) only; no hazmat outside the contiguous US.
+//   - Classes 2.1, 2.2, 3, 5.1, 8, and 9 dry ice. Class 1, 2.3, 4, 5.2, 6, 7 out.
+//   - No lithium batteries (we print no lithium battery mark), no Fully
+//     Regulated items, and no hazmat product missing its UN number and class.
+const HAZMAT_SERVICE = 'GRND';
+const HAZMAT_OUT_OF_AREA = ['AK', 'HI', 'PR', 'GU', 'VI', 'AS', 'MP', 'AA', 'AE', 'AP'];
+const HAZMAT_CLASSES = ['2.1', '2.2', '3', '5.1', '8', '9'];
+const DRY_ICE_UN = '1845';
+
+function hazmatClassOf(p) {
+  const m = String(p.hazmatClassDivisionNumber || '').match(/\d(\.\d)?/);
+  return m ? m[0] : '';
+}
+
+// Why this order's hazmat can't go OnTrac, or null when it can.
+function hazmatRefusal(order) {
+  const lines = orderProducts(order).filter(isHazmatLine);
+  if (!lines.length) return null;
+  const to = getAddr(order.shipTo);
+  const state = String(to.state || '').toUpperCase();
+  if (String(to.country || 'US').toUpperCase() !== 'US' || HAZMAT_OUT_OF_AREA.includes(state)) {
+    return 'hazmat ships within the contiguous US only (ship-to ' + (to.country || '?') + ' ' + state + ')';
+  }
+  for (const p of lines) {
+    const sku = p.sku || p.description || 'unknown SKU';
+    const un  = String(p.hazmatIdentificationNumber || '').replace(/\D/g, '');
+    const cls = hazmatClassOf(p);
+    const type = String(p.hazmatTypeName || '').trim().toUpperCase();
+    if (!un && !cls) return sku + ' is hazmat but has no UN number or class in Logiwa';
+    if (LITHIUM_UN.includes(un)) return sku + ' holds lithium batteries (UN' + un + ') — no lithium battery mark is printed';
+    if (type === 'FR') return sku + ' is Fully Regulated hazmat';
+    if (cls && !HAZMAT_CLASSES.includes(cls)) return sku + ' is class ' + cls + ' — not shipped through OnTrac';
+    if (cls === '9' && un !== DRY_ICE_UN) return sku + ' is class 9 (UN' + (un || '?') + ') — not shipped through OnTrac';
+  }
+  return null;
+}
+
 // --- LIMITED QUANTITY MARK ----------------------------------------------------
 // A hazmat carton must carry the Limited Quantity mark (49 CFR §172.315): a
 // square on point, top and bottom corners black, centre white. We print it as
@@ -267,17 +308,45 @@ function hazmatAttributes(order) {
 // is too small for that. A 4x6 label is 101.6 mm wide, so the largest mark it
 // can hold is about 63 mm per side — the reduced size, right for small parcels.
 //
+// Small Quantity (49 CFR 173.4, inner containers of 30 mL / 30 g or less) takes
+// no diamond: the package is marked with the 173.4 statement instead (GOFO
+// guide §3.5.6), so we print that in its place. Logiwa has no "small quantity"
+// Hazmat Type, so a product opts in with Hazmat Type EQ or by naming 173.4 /
+// "small quantity" in its shipping name — the same rule as the DHL middleware.
+//
 // Lithium batteries take the lithium battery mark instead, which needs a UN
 // number and phone number; we do not print that one.
 
 const LITHIUM_UN = ['3480', '3481', '3090', '3091'];
+const SMALL_QTY_TYPES = (process.env.SMALL_QTY_HAZMAT_TYPES || 'EQ')
+  .split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+const SMALL_QTY_STATEMENT = 'This package conforms to 49 CFR 173.4 for domestic highway or rail transport only.';
 
-// Does this box hold hazmat that takes the Limited Quantity mark? Uses the
-// box's own products[]; when Logiwa sends none, the order's items stand in.
-function needsLimitedQuantityMark(order, box) {
-  const own = box && Array.isArray(box.products) && box.products.length ? box.products : null;
-  return (own || orderProducts(order)).filter(isHazmatLine).some(p =>
-    !LITHIUM_UN.includes(String(p.hazmatIdentificationNumber || '').replace(/\D/g, '')));
+function isSmallQuantityLine(p) {
+  const type = String(p.hazmatTypeName || p.hazmatType || '').trim().toUpperCase();
+  return SMALL_QTY_TYPES.includes(type)
+    || /173\.4\b|small\s+quantit/i.test(p.hazmatShippingName || '');
+}
+
+// Which mark this box's hazmat takes: 'LQ', 'SQ' or null. Uses the box's own
+// products[]; when Logiwa sends none, the order's items stand in.
+function hazmatMarkFor(order, box) {
+  const own   = box && Array.isArray(box.products) && box.products.length ? box.products : null;
+  const lines = (own || orderProducts(order)).filter(isHazmatLine)
+    .filter(p => !LITHIUM_UN.includes(String(p.hazmatIdentificationNumber || '').replace(/\D/g, '')));
+  if (!lines.length) return null;
+  return lines.every(isSmallQuantityLine) ? 'SQ' : 'LQ';
+}
+
+// Breaks text into lines no wider than `room` at the given size.
+function wrapText(text, measure, room) {
+  const out = [];
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    const last = out[out.length - 1];
+    if (last !== undefined && measure(last + ' ' + word) <= room) out[out.length - 1] = last + ' ' + word;
+    else out.push(word);
+  }
+  return out;
 }
 
 // The mark as plain geometry, in whatever unit the caller draws in.
@@ -304,10 +373,60 @@ async function lqMarkPdf(pdfBase64, caption) {
   page.drawSvgPath(P([[g.cx, g.cy - g.r], [g.cx + g.r, g.cy], [g.cx, g.cy + g.r], [g.cx - g.r, g.cy]]), { ...at, color: rgb(0, 0, 0) });
   const w = g.ri - g.a;                    // half-width of the white band at its top and bottom
   page.drawSvgPath(P([[g.cx - w, g.cy - g.a], [g.cx + w, g.cy - g.a], [g.cx + g.ri, g.cy], [g.cx + w, g.cy + g.a], [g.cx - w, g.cy + g.a], [g.cx - g.ri, g.cy]]), { ...at, color: rgb(1, 1, 1) });
+  // One caption line per entry, centred; the size drops until the widest fits.
   const font = await doc.embedFont(StandardFonts.HelveticaBold);
-  const size = 14;
-  page.drawText(caption, { x: (W - font.widthOfTextAtSize(caption, size)) / 2, y: 7 * mm, size, font, color: rgb(0, 0, 0) });
+  const room = W - 2 * 4 * mm;
+  let size = 14;
+  while (size > 6 && Math.max(...caption.map(l => font.widthOfTextAtSize(l, size))) > room) size -= 0.5;
+  caption.forEach((line, i) => {
+    const y = 7 * mm + (caption.length - 1 - i) * size * 1.25;
+    page.drawText(line, { x: (W - font.widthOfTextAtSize(line, size)) / 2, y, size, font, color: rgb(0, 0, 0) });
+  });
   return Buffer.from(await doc.save()).toString('base64');
+}
+
+// The Small Quantity page: the 173.4 statement, large and centred, with the
+// order code under it.
+async function sqMarkPdf(pdfBase64, orderCode) {
+  const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
+  const doc   = await PDFDocument.load(Buffer.from(pdfBase64, 'base64'));
+  const { width: W, height: H } = doc.getPage(0).getSize();
+  const page  = doc.addPage([W, H]);
+  const mm    = 72 / 25.4;
+  const font  = await doc.embedFont(StandardFonts.HelveticaBold);
+  const room  = W - 2 * 8 * mm;
+  const size  = 20;
+  const lines = wrapText(SMALL_QTY_STATEMENT, l => font.widthOfTextAtSize(l, size), room);
+  const lead  = size * 1.3;
+  let y = H / 2 + (lines.length * lead) / 2;
+  page.drawRectangle({ x: 5 * mm, y: y - lines.length * lead - 4 * mm, width: W - 10 * mm, height: lines.length * lead + 10 * mm, borderColor: rgb(0, 0, 0), borderWidth: 2 });
+  for (const line of lines) {
+    y -= lead;
+    page.drawText(line, { x: (W - font.widthOfTextAtSize(line, size)) / 2, y: y + lead * 0.25, size, font, color: rgb(0, 0, 0) });
+  }
+  if (orderCode) {
+    let s = 14;
+    while (s > 6 && font.widthOfTextAtSize(orderCode, s) > W - 8 * mm) s -= 0.5;
+    page.drawText(orderCode, { x: (W - font.widthOfTextAtSize(orderCode, s)) / 2, y: 7 * mm, size: s, font, color: rgb(0, 0, 0) });
+  }
+  return Buffer.from(await doc.save()).toString('base64');
+}
+
+function sqMarkZpl(label, orderCode) {
+  const plain = String(label).includes('^XA');
+  const zpl   = plain ? String(label) : Buffer.from(String(label), 'base64').toString('utf8');
+  if (!zpl.includes('^XA')) throw new Error('label is not ZPL text');
+  const pw  = parseInt((zpl.match(/\^PW(\d+)/) || [])[1], 10) || 812;
+  const dpm = pw / 101.6;
+  const W = pw, H = Math.round(pw * 1.5);
+  const clean = s => String(s).replace(/[\^~\\]/g, ' ');
+  const out = ['^XA', '^PW' + W, '^LL' + H, '^LH0,0',
+    '^FO' + Math.round(5 * dpm) + ',' + Math.round(H / 2 - 30 * dpm) + '^GB' + Math.round(W - 10 * dpm) + ',' + Math.round(60 * dpm) + ',' + Math.round(0.7 * dpm) + '^FS',
+    '^FO' + Math.round(8 * dpm) + ',' + Math.round(H / 2 - 24 * dpm) + '^A0N,' + Math.round(7 * dpm) + ',' + Math.round(7 * dpm) + '^FB' + Math.round(W - 16 * dpm) + ',6,' + Math.round(1.5 * dpm) + ',C^FD' + clean(SMALL_QTY_STATEMENT) + '^FS'];
+  if (orderCode) out.push('^FO' + Math.round(4 * dpm) + ',' + Math.round(H - 18 * dpm) + '^A0N,' + Math.round(5 * dpm) + ',' + Math.round(5 * dpm) + '^FB' + Math.round(W - 8 * dpm) + ',2,' + Math.round(dpm) + ',C^FD' + clean(orderCode) + '^FS');
+  out.push('^XZ');
+  const both = zpl.replace(/\s+$/, '') + '\n' + out.join('\n') + '\n';
+  return plain ? both : Buffer.from(both).toString('base64');
 }
 
 // Carriers hand ZPL back either as plain text or base64; return it the same way.
@@ -334,27 +453,35 @@ function lqMarkZpl(label, caption) {
       strip(g.cx + hw - bar, y, bar);
     }
   }
-  out.push('^FO0,' + Math.round(H - 14 * dpm) + '^A0N,' + Math.round(5 * dpm) + ',' + Math.round(5 * dpm) + '^FB' + W + ',1,0,C^FD' + caption.replace(/[\^~\\]/g, ' ') + '^FS', '^XZ');
+  // ^FB wraps inside the label width; \& starts each caption line on its own row.
+  const text = caption.map(l => l.replace(/[\^~\\]/g, ' ')).join('\\&');
+  const lines = caption.length + 1;        // room for one extra wrap of a long order code
+  out.push('^FO' + Math.round(4 * dpm) + ',' + Math.round(H - (6 + 6 * lines) * dpm) + '^A0N,' + Math.round(5 * dpm) + ',' + Math.round(5 * dpm) + '^FB' + Math.round(W - 8 * dpm) + ',' + lines + ',' + Math.round(dpm) + ',C^FD' + text + '^FS', '^XZ');
   const both = zpl.replace(/\s+$/, '') + '\n' + out.join('\n') + '\n';
   return plain ? both : Buffer.from(both).toString('base64');
 }
 
-// The shipping label with the Limited Quantity mark added after it, when the
-// box needs one. The shipping label is already bought by the time this runs,
-// so any failure here hands the original label back untouched.
+// The shipping label with the box's hazmat mark added after it: the Limited
+// Quantity diamond, or the 173.4 statement for Small Quantity. The shipping
+// label is already bought by the time this runs, so any failure here hands
+// the original label back untouched.
 async function withLimitedQuantityMark(tag, label, format, order, box) {
-  if (!label || !needsLimitedQuantityMark(order, box)) return label;
-  const fmt = String(format || '').toLowerCase();
-  const caption = 'LIMITED QUANTITY - ' + (order.shipmentOrderCode || '');
+  const mark = label && hazmatMarkFor(order, box);
+  if (!mark) return label;
+  const fmt  = String(format || '').toLowerCase();
+  const code = order.shipmentOrderCode || '';
+  const name = mark === 'SQ' ? 'Small Quantity (49 CFR 173.4) statement' : 'Limited Quantity mark';
+  // Two lines, so a long order code never runs off the edge of the label.
+  const caption = ['LIMITED QUANTITY', code].filter(Boolean);
   try {
     let out;
-    if (fmt.includes('zpl')) out = lqMarkZpl(label, caption);
-    else if (fmt.includes('pdf')) out = await lqMarkPdf(label, caption);
+    if (fmt.includes('zpl')) out = mark === 'SQ' ? sqMarkZpl(label, code) : lqMarkZpl(label, caption);
+    else if (fmt.includes('pdf')) out = mark === 'SQ' ? await sqMarkPdf(label, code) : await lqMarkPdf(label, caption);
     else throw new Error('cannot add a label to ' + (format || 'unknown') + ' format');
-    console.log('[' + tag + '] Limited Quantity mark added after the shipping label (' + fmt + ')');
+    console.log('[' + tag + '] ' + name + ' added after the shipping label (' + fmt + ')');
     return out;
   } catch (e) {
-    console.warn('[' + tag + '] ⚠ could not add the Limited Quantity mark — apply one by hand: ' + e.message);
+    console.warn('[' + tag + '] ⚠ could not add the ' + name + ' — apply one by hand: ' + e.message);
     return label;
   }
 }
@@ -530,6 +657,20 @@ app.post('/get-rate', async (req, res) => {
       const hazmat = hazmatSkus(order);
       console.log('[GET-RATE] ' + order.shipmentOrderCode + ' products=' + orderProducts(order).length + ' hazmat=' + (hazmat.length ? hazmat.join(',') : 'no'));
 
+      // Hazmat OnTrac shouldn't carry: no rates, so the rate shop picks another carrier.
+      const refusal = hazmatRefusal(order);
+      if (refusal) {
+        console.log('[GET-RATE] ' + order.shipmentOrderCode + ' — hazmat refused: ' + refusal);
+        out.push({
+          shipmentOrderCode:       order.shipmentOrderCode,
+          shipmentOrderIdentifier: order.shipmentOrderIdentifier,
+          rateList:     [],
+          isSuccessful: false,
+          message:      ['No OnTrac rates — ' + refusal],
+        });
+        continue;
+      }
+
       let rateList = [], msg = '';
       const requestedService = mapServiceCode(order.shippingOption);
       const result = await fetchOnTracRates(order, 'GET-RATE');
@@ -547,6 +688,9 @@ app.post('/get-rate', async (req, res) => {
             currency:       svc.currency,
             estimatedDays:  svc.estimatedDays,
           }));
+
+        // Hazmat goes by Ground only.
+        if (hazmat.length) rateList = rateList.filter(r => r.shippingOption === HAZMAT_SERVICE);
 
         // Prefer the requested service if available
         const matched = rateList.find(r => r.shippingOption === requestedService);
@@ -623,6 +767,11 @@ app.post('/create-label', async (req, res) => {
 
     for (const order of orders) {
       const hazmat = hazmatSkus(order);
+      const refusal = hazmatRefusal(order);
+      if (refusal) throw new Error('Hazmat not accepted by OnTrac: ' + refusal);
+      if (hazmat.length && mapServiceCode(order.shippingOption) !== HAZMAT_SERVICE) {
+        throw new Error('Hazmat ships by OnTrac Ground (' + HAZMAT_SERVICE + ') only, not ' + mapServiceCode(order.shippingOption));
+      }
       if (hazmat.length) console.log('[CREATE-LABEL] ' + order.shipmentOrderCode + ' hazmat=' + hazmat.join(',') + ' — declared to OnTrac as ' + hazmatAttributes(order).join('+'));
 
       const pkg       = order.requestedPackageLineItems?.[0] || {};
