@@ -42,7 +42,20 @@ const NORATE_RETRY_MS = parseInt(process.env.ONTRAC_NORATE_RETRY_MS || '250', 10
 const EXTRA_CALL_TIMEOUT_MS = parseInt(process.env.ONTRAC_EXTRA_CALL_TIMEOUT_MS || '1500', 10);
 // Cap on the normal rate call. OnTrac sometimes hangs 20-30s and then answers NoRate, and
 // Logiwa waits for every carrier before it makes the label, so a slow answer = no OnTrac rate.
-const RATE_TIMEOUT_MS = parseInt(process.env.ONTRAC_RATE_TIMEOUT_MS || '5000', 10);
+const RATE_TIMEOUT_MS = parseInt(process.env.ONTRAC_RATE_TIMEOUT_MS || '3000', 10);
+
+// Daily rate-call counts (New York date -> counts), last 14 days, served at GET /stats for the
+// end-of-day report. In memory only, so a restart starts the day's counts again.
+const rateStats = {};
+function statsDay() { return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' }); }
+function recordRate(kind, ms, orderCode) {
+  const day = statsDay();
+  const d = rateStats[day] ||= { calls: 0, priced: 0, noRate: 0, otherError: 0, timedOut: 0, paused: 0, slowestMs: 0, timedOutOrders: [] };
+  d.calls++; d[kind]++;
+  if (ms > d.slowestMs && kind !== 'timedOut') d.slowestMs = ms;
+  if (kind === 'timedOut' && d.timedOutOrders.length < 50) d.timedOutOrders.push(orderCode);
+  for (const k of Object.keys(rateStats).sort().slice(0, -14)) delete rateStats[k];
+}
 // ONTRAC_PAUSED=1 takes OnTrac out of rate shopping: get-rate answers "no rate" at once,
 // without calling OnTrac. Labels for orders that already chose OnTrac still print.
 const PAUSED = process.env.ONTRAC_PAUSED === '1';
@@ -724,6 +737,7 @@ async function fetchOnTracRates(order, tag, opts = {}) {
         continue;
       }
       if (isNoRate) return { noRate: true };
+      if (!e.response && (e.code === 'ECONNABORTED' || /timeout/i.test(e.message))) return { error: 'no answer within ' + RATE_TIMEOUT_MS + 'ms', timedOut: true };
       return { error: e.response?.data?.ErrorMessage || e.message };
     }
   }
@@ -739,6 +753,9 @@ app.get('/', (req, res) => res.json({
   customerBranch:  ONTRAC_CUSTOMER_BRANCH,
   injectionFacility: INJECTION_FACILITY_CODE,
 }));
+
+// Daily rate-call counts for the end-of-day report.
+app.get('/stats', (req, res) => res.json({ rateTimeoutMs: RATE_TIMEOUT_MS, paused: PAUSED, days: rateStats }));
 
 // --- LABEL PROXY --------------------------------------------------------------
 
@@ -776,6 +793,7 @@ app.post('/get-rate', async (req, res) => {
 
       // Hazmat OnTrac shouldn't carry: no rates, so the rate shop picks another carrier.
       const refusal = PAUSED ? 'OnTrac is paused (ONTRAC_PAUSED=1)' : hazmatRefusal(order);
+      if (PAUSED) recordRate('paused', 0, order.shipmentOrderCode);
       if (refusal) {
         console.log('[GET-RATE] ' + order.shipmentOrderCode + ' — no rate: ' + refusal);
         out.push({
@@ -790,7 +808,11 @@ app.post('/get-rate', async (req, res) => {
 
       let rateList = [], msg = '';
       const requestedService = mapServiceCode(order.shippingOption);
+      const startedAt = Date.now();
       const result = await fetchOnTracRates(order, 'GET-RATE');
+      recordRate(result.services ? 'priced' : result.noRate ? 'noRate' : result.timedOut ? 'timedOut' : 'otherError',
+        Date.now() - startedAt, order.shipmentOrderCode);
+      if (result.timedOut) console.log('[GET-RATE] TIMEOUT ' + order.shipmentOrderCode + ' — OnTrac gave no answer in ' + RATE_TIMEOUT_MS + 'ms, no OnTrac rate offered');
 
       if (result.services) {
         rateList = result.services
