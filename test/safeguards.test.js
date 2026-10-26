@@ -26,6 +26,7 @@ before(async () => {
     rateCalls[code] = (rateCalls[code] || 0) + 1;
     seenAttributes.rate[code] = req.body.Pieces[0].Attributes;
     const next = (script[code] || []).shift() || 'ok';
+    if (next === 'slow') return setTimeout(() => res.status(400).json({ Error: true, ErrorMessage: 'NoRate' }), 1000);
     if (next === 'norate') return res.status(400).json({ Error: true, ErrorMessage: 'NoRate' });
     res.json({ Error: false, ServicesAndCharges: { GRND: { UTCExpectedDeliveryBy: '2030-01-02T22:00:00',
       Charges: [{ ChargeCode: 'BS', Amount: 4.96, Currency: 'USD' }, { ChargeCode: 'EN', Amount: 1.06, Currency: 'USD' }, { ChargeCode: 'RC', Amount: 0.66, Currency: 'USD' }] } } });
@@ -40,7 +41,7 @@ before(async () => {
 
   Object.assign(process.env, {
     ONTRAC_BASE_URL: 'http://127.0.0.1:' + port, ONTRAC_WSID: 'id', ONTRAC_WSKEY: 'key', ONTRAC_CUSTOMER_BRANCH: 'TEST',
-    ONTRAC_NORATE_RETRY_MS: '10', SLACK_WEBHOOK_URL: 'http://127.0.0.1:' + port + '/slack',
+    ONTRAC_NORATE_RETRY_MS: '10', ONTRAC_RATE_TIMEOUT_MS: '300', SLACK_WEBHOOK_URL: 'http://127.0.0.1:' + port + '/slack',
   });
   delete process.env.ONTRAC_NORATE_MODE;
   delete process.env.ONTRAC_HAZMAT_SIGNATURE;
@@ -71,6 +72,15 @@ test('NoRate: OnTrac is NOT offered, never at $0, and no second call is made', a
   assert.deepEqual(r.rateList, []);
   assert.match(r.message[0], /NoRate/);
   assert.equal(rateCalls.B1, 1, 'no retry by default — no added time');
+});
+
+test('OnTrac hangs: no rate after the rate timeout instead of holding up the rate shop', async () => {
+  script.SLOW1 = ['slow'];
+  const t = Date.now();
+  const r = await rate(order('SLOW1'));
+  assert.ok(Date.now() - t < 900, 'answered in ' + (Date.now() - t) + 'ms');
+  assert.equal(r.isSuccessful, false);
+  assert.deepEqual(r.rateList, []);
 });
 
 test('label with no remembered price: asks OnTrac again instead of sending $0', async () => {
