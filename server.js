@@ -38,8 +38,14 @@ const NORATE_MODE     = (process.env.ONTRAC_NORATE_MODE || 'unavailable').toLowe
 const NORATE_RETRY    = process.env.ONTRAC_NORATE_RETRY === '1';
 const NORATE_RETRY_MS = parseInt(process.env.ONTRAC_NORATE_RETRY_MS || '250', 10);
 // Hard cap on the EXTRA OnTrac calls the safeguards add (the retry, and the re-check at label
-// time), so a slow OnTrac can never hold a packer up. The normal first rate call is unchanged.
+// time), so a slow OnTrac can never hold a packer up.
 const EXTRA_CALL_TIMEOUT_MS = parseInt(process.env.ONTRAC_EXTRA_CALL_TIMEOUT_MS || '1500', 10);
+// Cap on the normal rate call. OnTrac sometimes hangs 20-30s and then answers NoRate, and
+// Logiwa waits for every carrier before it makes the label, so a slow answer = no OnTrac rate.
+const RATE_TIMEOUT_MS = parseInt(process.env.ONTRAC_RATE_TIMEOUT_MS || '5000', 10);
+// ONTRAC_PAUSED=1 takes OnTrac out of rate shopping: get-rate answers "no rate" at once,
+// without calling OnTrac. Labels for orders that already chose OnTrac still print.
+const PAUSED = process.env.ONTRAC_PAUSED === '1';
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL || '';
 
 const MIDDLEWARE_URL = process.env.RAILWAY_PUBLIC_DOMAIN
@@ -690,11 +696,11 @@ async function fetchOnTracRates(order, tag, opts = {}) {
   for (let attempt = 1; attempt <= 2; attempt++) {
     logRequest(tag, 'POST', rateUrl.replace(ONTRAC_WSKEY, '***WSKey***'), rateReq);
     try {
-      // Only the extra calls are capped: the retry, and every call made at label time.
+      // The extra calls (the retry, and every call made at label time) get the tighter cap.
       const capped = attempt > 1 || opts.extra;
       const rateRes = await axios.post(rateUrl, rateReq, {
         headers: { 'Content-Type': 'application/json' },
-        ...(capped ? { timeout: EXTRA_CALL_TIMEOUT_MS } : {}),
+        timeout: capped ? EXTRA_CALL_TIMEOUT_MS : RATE_TIMEOUT_MS,
       });
       logResponse(tag, rateRes.status, rateRes.data);
       // ServicesAndCharges is an object keyed by service code, not an array
@@ -769,9 +775,9 @@ app.post('/get-rate', async (req, res) => {
       console.log('[GET-RATE] ' + order.shipmentOrderCode + ' products=' + orderProducts(order).length + ' hazmat=' + (hazmat.length ? hazmat.join(',') : 'no'));
 
       // Hazmat OnTrac shouldn't carry: no rates, so the rate shop picks another carrier.
-      const refusal = hazmatRefusal(order);
+      const refusal = PAUSED ? 'OnTrac is paused (ONTRAC_PAUSED=1)' : hazmatRefusal(order);
       if (refusal) {
-        console.log('[GET-RATE] ' + order.shipmentOrderCode + ' — hazmat refused: ' + refusal);
+        console.log('[GET-RATE] ' + order.shipmentOrderCode + ' — no rate: ' + refusal);
         out.push({
           shipmentOrderCode:       order.shipmentOrderCode,
           shipmentOrderIdentifier: order.shipmentOrderIdentifier,
@@ -1118,7 +1124,7 @@ app.post('/end-of-day-report', (req, res) => {
 
 if (require.main === module) app.listen(PORT, () => {
   console.log('\nOnTrac-Logiwa Middleware v1.1.0 on port ' + PORT);
-  console.log('   NoRate mode      : ' + NORATE_MODE + (SLACK_WEBHOOK_URL ? ' (Slack alerts on)' : ' (Slack alerts off — no SLACK_WEBHOOK_URL)') + ', retry ' + (NORATE_RETRY ? 'on' : 'off'));
+  console.log('   NoRate mode      : ' + NORATE_MODE + (SLACK_WEBHOOK_URL ? ' (Slack alerts on)' : ' (Slack alerts off — no SLACK_WEBHOOK_URL)') + ', retry ' + (NORATE_RETRY ? 'on' : 'off') + ', rate timeout ' + RATE_TIMEOUT_MS + 'ms' + (PAUSED ? ', PAUSED (no rates)' : ''));
   console.log('   Label proxy      : ' + MIDDLEWARE_URL + '/label/:id');
   console.log('   Customer Branch  : ' + ONTRAC_CUSTOMER_BRANCH);
   console.log('   Injection Facility: ' + INJECTION_FACILITY_CODE);
