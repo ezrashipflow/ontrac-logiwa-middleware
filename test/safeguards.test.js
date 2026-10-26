@@ -81,6 +81,8 @@ test('OnTrac hangs: no rate after the rate timeout instead of holding up the rat
   assert.ok(Date.now() - t < 900, 'answered in ' + (Date.now() - t) + 'ms');
   assert.equal(r.isSuccessful, false);
   assert.deepEqual(r.rateList, []);
+  const day = Object.values((await axios.get(base + '/stats')).data.days).pop();
+  assert.ok(day.timedOut >= 1 && day.timedOutOrders.includes('SLOW1'));
 });
 
 test('label with no remembered price: asks OnTrac again instead of sending $0', async () => {
