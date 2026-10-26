@@ -42,7 +42,7 @@ const NORATE_RETRY_MS = parseInt(process.env.ONTRAC_NORATE_RETRY_MS || '250', 10
 const EXTRA_CALL_TIMEOUT_MS = parseInt(process.env.ONTRAC_EXTRA_CALL_TIMEOUT_MS || '1500', 10);
 // Cap on the normal rate call. OnTrac sometimes hangs 20-30s and then answers NoRate, and
 // Logiwa waits for every carrier before it makes the label, so a slow answer = no OnTrac rate.
-const RATE_TIMEOUT_MS = parseInt(process.env.ONTRAC_RATE_TIMEOUT_MS || '3000', 10);
+const RATE_TIMEOUT_MS = parseInt(process.env.ONTRAC_RATE_TIMEOUT_MS || '5000', 10);
 
 // Daily rate-call counts (New York date -> counts), last 14 days, served at GET /stats for the
 // end-of-day report. In memory only, so a restart starts the day's counts again.
